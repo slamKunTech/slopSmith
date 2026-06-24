@@ -1,0 +1,83 @@
+<div class="space-y-3">
+    <div>
+        <label class="block text-xs text-slate-400 mb-1">Audio Sync Offset</label>
+        <div class="flex items-center gap-3">
+            <input type="range" id="ae-sync-offset" min="-0.2" max="0.5" step="0.005" value="0.2"
+                   class="flex-1 accent-blue-500">
+            <span id="ae-sync-offset-label" class="text-sm text-slate-300 w-16 text-right">200ms</span>
+        </div>
+        <p class="text-xs text-slate-500 mt-1">Compensates for audio latency. Increase if music leads the tab, decrease if tab leads the music.</p>
+    </div>
+    <div>
+        <label class="block text-xs text-slate-400 mb-1">Audio Quality (Guitar Pro → audio rendering)</label>
+        <div class="space-y-2">
+            <label class="flex items-start gap-2 text-sm text-slate-300 cursor-pointer">
+                <input type="radio" name="ae-sf-quality" value="default" id="ae-sf-default" class="mt-1 accent-blue-500">
+                <span>
+                    <span class="block">Default — GeneralUser GS (~32 MB, bundled)</span>
+                    <span class="block text-xs text-slate-500">Good quality for practice-reference audio. Ships with the installer.</span>
+                </span>
+            </label>
+            <label class="flex items-start gap-2 text-sm text-slate-300 cursor-pointer">
+                <input type="radio" name="ae-sf-quality" value="high" id="ae-sf-high" class="mt-1 accent-blue-500" disabled>
+                <span>
+                    <span class="block">High — FluidR3_GM (~142 MB, downloaded)</span>
+                    <span id="ae-sf-high-status" class="block text-xs text-slate-500">Not downloaded yet.</span>
+                </span>
+            </label>
+        </div>
+        <div class="mt-2 flex items-center gap-2">
+            <button id="ae-sf-download" class="px-3 py-1.5 rounded bg-slate-600 hover:bg-slate-500 text-sm">Download 142 MB</button>
+            <button id="ae-sf-cancel" class="hidden px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm">Cancel</button>
+            <span id="ae-sf-progress-label" class="hidden text-xs text-slate-400"></span>
+        </div>
+        <progress id="ae-sf-progress" class="hidden w-full mt-2 h-1.5" max="100" value="0"></progress>
+        <p id="ae-sf-message" class="hidden text-xs mt-2"></p>
+    </div>
+    <div>
+        <label class="block text-xs text-slate-400 mb-1">DLC Folder</label>
+        <div class="flex gap-2">
+            <input type="text" id="ae-dlc-path" class="flex-1 bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm">
+            <button id="ae-pick-dlc" class="px-3 py-1.5 rounded bg-slate-600 hover:bg-slate-500 text-sm">Browse</button>
+        </div>
+    </div>
+    <div>
+        <label class="block text-xs text-slate-400 mb-1">NAM Models Folder</label>
+        <div class="flex gap-2">
+            <input type="text" id="ae-nam-path" class="flex-1 bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm">
+            <button id="ae-pick-nam" class="px-3 py-1.5 rounded bg-slate-600 hover:bg-slate-500 text-sm">Browse</button>
+        </div>
+    </div>
+    <div>
+        <label class="block text-xs text-slate-400 mb-1">Cabinet IRs Folder</label>
+        <div class="flex gap-2">
+            <input type="text" id="ae-ir-path" class="flex-1 bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm">
+            <button id="ae-pick-ir" class="px-3 py-1.5 rounded bg-slate-600 hover:bg-slate-500 text-sm">Browse</button>
+        </div>
+    </div>
+    <div>
+        <label class="block text-xs text-slate-400 mb-1">Saved Presets</label>
+        <div id="ae-preset-list" class="space-y-1 max-h-40 overflow-y-auto"></div>
+    </div>
+    <div id="ae-tone-automation" class="border-t border-slate-700 pt-3">
+        <div class="text-xs font-semibold text-slate-300 mb-1">Tone Automation</div>
+        <p class="text-xs text-slate-500 mb-3">
+            Configure keyword filters and preset targets here. Turn Tone Automation on or off from the Chain panel (Mode → Tone Automation).
+        </p>
+        <p class="text-xs text-slate-500 mb-3">
+            Selects a target preset based on keywords found in song titles, tone names, or text inputs.
+            Precedence: <span class="text-slate-400">SOLO &gt; DIST &gt; OD &gt; CLEAN &gt; BASS &gt; ACOUSTIC &gt; MOD</span>.
+            If no keyword matches, the Idle Target is loaded.
+        </p>
+
+        <div class="mb-3">
+            <div class="text-xs text-slate-400 mb-2">Auto Classifier Filters</div>
+            <div id="ae-ta-filters" class="space-y-2"></div>
+        </div>
+
+        <div>
+            <div class="text-xs text-slate-400 mb-2">Target Mapping</div>
+            <div id="ae-ta-targets" class="space-y-1.5"></div>
+        </div>
+    </div>
+</div>

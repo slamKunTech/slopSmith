@@ -1,0 +1,19 @@
+# Desktop-only Python extras for the bundled runtime.
+#
+# Slopsmith's runtime requirements are installed from
+# $SLOPSMITH_DIR/requirements.txt by the platform build scripts
+# (bundle-python.sh / build-macos.sh / build-windows.sh) BEFORE this
+# file is processed. That's the single source of truth for server-
+# side runtime deps — DO NOT duplicate slopsmith's requirements here.
+#
+# This file is reserved for packages the desktop bundle needs that
+# are NOT in slopsmith's requirements.txt. Today that's:
+#
+#   - `requests`: pulled by some desktop-side helpers and a handful
+#     of community plugins; keep it explicit in the bundle.
+#   - `certifi`: the desktop main process points SSL_CERT_FILE at
+#     certifi's bundle so stdlib urllib (Slopsmith's update checker,
+#     the slopsmith-update-manager plugin, etc.) can verify HTTPS
+#     without falling back to a missing system CA path.
+requests
+certifi

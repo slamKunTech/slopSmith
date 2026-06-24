@@ -1,0 +1,214 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+            arch: x64
+          - os: macos-14
+            platform: mac
+            arch: arm64
+          - os: windows-latest
+            platform: win
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Read build configuration to get version numbers for setup tools
+      - name: Read build configuration
+        id: config
+        shell: bash
+        run: |
+          NODE_VERSION=$(node -p "require('./.build-config.json').versions.node")
+          PYTHON_VERSION=$(node -p "require('./.build-config.json').versions.python")
+          DOTNET_VERSION=$(node -p "require('./.build-config.json').versions.dotnet")
+          echo "node=$NODE_VERSION" >> $GITHUB_OUTPUT
+          echo "python=$PYTHON_VERSION" >> $GITHUB_OUTPUT
+          echo "dotnet=$DOTNET_VERSION" >> $GITHUB_OUTPUT
+          echo "Node ${NODE_VERSION}, Python ${PYTHON_VERSION}, .NET ${DOTNET_VERSION}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.config.outputs.node }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.config.outputs.python }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ steps.config.outputs.dotnet }}.x
+
+      # macOS only: import the Developer ID Application certificate into a
+      # temporary keychain so codesign + electron-builder + notarytool can
+      # find it. The keychain is wiped at the end of the job (see "Clean
+      # up signing keychain" below) so a re-run of the same job doesn't
+      # see stale state. The whole step is a no-op when the secret is
+      # absent — supports forks and PRs from contributors who can't
+      # access repository secrets.
+      # Step is unconditional on macOS so we always enter the shell, then
+      # bail out at runtime if the cert secret isn't present (forks /
+      # contributor PRs without secret access, etc.). step-level env: is
+      # NOT available in step-level if: expressions, and `secrets.*` is
+      # also not available there — runtime check is the only robust way
+      # to gate this on secret presence.
+      - name: Import Apple signing certificate
+        if: matrix.platform == 'mac'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_CERTIFICATE_P12_BASE64:-}" ]]; then
+              echo "APPLE_CERTIFICATE_P12_BASE64 not set — skipping (unsigned build)"
+              exit 0
+          fi
+          # printf '%s' rather than echo — echo would append a trailing
+          # newline that some toolchains accept and some reject when
+          # piped into base64 --decode, producing a subtly corrupted
+          # .p12 that fails security import with the unhelpful error
+          # "SecKeychainItemImport: One or more parameters passed to a
+          # function were not valid."
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          # Add build.keychain to the user search list — codesign and
+          # electron-builder look up identities via the search list, not
+          # the default-keychain pointer. Without this, identity-by-name
+          # lookups fall back to the unmodified login keychain and the
+          # imported cert is invisible. Keep login.keychain-db in the
+          # list so trust anchors etc. still resolve.
+          security list-keychains -d user -s build.keychain login.keychain-db
+          security import "$RUNNER_TEMP/cert.p12" -k build.keychain \
+              -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list \
+              -S apple-tool:,apple:,codesign: \
+              -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Sanity check — verify the identity is actually present.
+          security find-identity -v -p codesigning build.keychain | grep -q "Developer ID Application"
+
+      # macOS only: inline the team ID into package.json so electron-builder's
+      # `notarize.teamId` field has a real value (it doesn't expand env vars).
+      # Build using the unified platform script
+      # All bundling and dependency installation is handled by the script.
+      # macOS-only env vars below are consumed by:
+      #   APPLE_SIGNING_IDENTITY → sign-macos-binaries.sh (codesign --sign)
+      #   APPLE_ID,
+      #   APPLE_APP_SPECIFIC_PASSWORD,
+      #   APPLE_TEAM_ID          → electron-builder's notarytool path
+      # build-macos.sh derives CSC_NAME (which electron-builder uses to
+      # pick the signing identity) from APPLE_SIGNING_IDENTITY by
+      # stripping the "Developer ID Application:" prefix electron-
+      # builder rejects. On non-mac platforms these are empty / unused.
+      - name: Build
+        run: ./scripts/build-release.sh
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # electron-builder defensively skips code signing on
+          # pull_request events ("forks usually don't have signing
+          # secrets"). For this repo PRs DO have signing secrets — the
+          # PR's own CI run is also the real signed-build verification —
+          # so override the default and always sign + notarize.
+          # Without this the notary service rejects the submission with
+          # "signature of the binary is invalid" + "no secure timestamp"
+          # + "no hardened runtime" on every nested Electron Helper app.
+          CSC_FOR_PULL_REQUEST: "true"
+
+      # Start a debugging session — runs BEFORE keychain cleanup so a
+      # signing-related failure can be inspected with the keychain still
+      # populated.
+      - name: Setup upterm session
+        uses: owenthereal/action-upterm@v1
+        if: ${{ failure() }}
+        with:
+          wait-timeout-minutes: 5
+
+      # macOS only: drop the temporary keychain so a re-run doesn't see
+      # leftover state. always() so this still runs when the build fails.
+      - name: Clean up signing keychain
+        if: always() && matrix.platform == 'mac'
+        run: |
+          security delete-keychain build.keychain 2>/dev/null || true
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: slopsmith-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+          if-no-files-found: warn
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          draft: true
+          generate_release_notes: true
+          prerelease: true
+
+  # Mirror release version to slopsmith core
+  # Requires SLOPSMITH_SYNC_TOKEN secret
+  notify-slopsmith:
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Dispatch VERSION sync to slopsmith
+        env:
+          GH_TOKEN: ${{ secrets.SLOPSMITH_SYNC_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="${REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag $REF_NAME is not vX.Y.Z — skipping slopsmith VERSION sync."
+            exit 0
+          fi
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::SLOPSMITH_SYNC_TOKEN secret is missing; cannot dispatch."
+            exit 1
+          fi
+          gh api -X POST repos/byrongamatos/slopsmith/dispatches \
+            -f event_type=desktop-released \
+            -f "client_payload[version]=$version"
+          echo "Dispatched desktop-released event (version=$version) to slopsmith."
