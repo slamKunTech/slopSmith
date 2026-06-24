@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+    body { margin: 0; background: radial-gradient(1200px 500px at 20% 10%, #131a2d, #050508); color: #cfd7e5; font-family: Inter, system-ui, sans-serif; }
+    .wrap { height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .card { width: 440px; border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; background: rgba(8,12,22,0.75); backdrop-filter: blur(6px); padding: 22px 24px; box-shadow: 0 18px 50px rgba(0,0,0,0.4); }
+    .brand { font-size: 20px; font-weight: 700; letter-spacing: 0.2px; color: #f3f7ff; }
+    .sub { margin-top: 3px; font-size: 12px; color: #86a0c4; }
+    .anim { margin: 22px auto 10px; width: 86px; height: 86px; display: flex; align-items: center; justify-content: center; }
+    #lottie-spinner { width: 86px; height: 86px; }
+    .status { margin-top: 8px; min-height: 20px; font-size: 13px; color: #a9bbd5; text-align: center; }
+    .count { font-size: 11px; color: #7186a9; margin-top: 6px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="brand">Slopsmith</div>
+    <div class="sub">Starting up — first launch may take a moment</div>
+    <div class="anim"><div id="lottie-spinner"></div></div>
+    <div id="status" class="status">Starting Slopsmith...</div>
+    <div id="count" class="count"></div>
+  </div>
+</div>
+<script src="./lottie.min.js"></script>
+<script>
+    // Use lottie-web to render the spinner animation (see spinner.json).
+    // Guarded with try-catch: if lottie.min.js fails to load the status text
+    // below still updates correctly.
+    try {
+        lottie.loadAnimation({
+            container: document.getElementById('lottie-spinner'),
+            renderer: 'svg',
+            loop: true,
+            autoplay: true,
+            path: './spinner.json'
+        });
+    } catch (e) {
+        // Animation unavailable — continue without spinner.
+        console.error('Failed to load lottie animation:', e);
+    }
+
+    var statusEl = document.getElementById('status');
+    var countEl = document.getElementById('count');
+    function render(status) {
+        if (!status) return;
+        statusEl.textContent = status.message || 'Starting Slopsmith...';
+        if (status.total > 0) {
+            countEl.textContent = (status.loaded || 0) + ' / ' + status.total;
+        } else {
+            countEl.textContent = '';
+        }
+    }
+    window.splashBridge.onStatus(render);
+</script>
+</body>
+</html>

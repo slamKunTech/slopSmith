@@ -1,0 +1,262 @@
+#!/bin/bash
+
+# Native Windows build script
+# Runs in Git Bash (Git for Windows)
+
+set -euo pipefail
+
+# Use plain `pwd` (POSIX path). `pwd -W` returns a Windows-form path
+# with backslashes on MSYS / Git Bash, which would then break `dirname`
+# and `source "$SCRIPT_DIR/build-common.sh"` since those expect POSIX
+# paths. If a Windows-form path is needed downstream (e.g. for cmake-js
+# or a non-MSYS tool), convert at the point of use via
+# `cygpath -w "$SCRIPT_DIR"`.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+CONFIG="$PROJECT_DIR/.build-config.json"
+
+# Platform identifier
+export PLATFORM="windows"
+
+# Check for Git Bash/MSYS
+if [[ "$OSTYPE" != "msys" ]] && [[ "$OSTYPE" != "win32" ]] && [[ -z "${MSYSTEM:-}" ]]; then
+    echo "Error: This script must be run in Git Bash (Git for Windows)" >&2
+    echo "Download: https://git-scm.com/download/win" >&2
+    exit 1
+fi
+
+echo "=== Slopsmith Desktop Windows Build ==="
+echo ""
+
+# Color setup
+export RED='\033[0;31m'
+export GREEN='\033[0;32m'
+export YELLOW='\033[1;33m'
+export BLUE='\033[0;34m'
+export NC='\033[0m'
+
+# Source common build logic
+source "$SCRIPT_DIR/build-common.sh"
+
+# Platform-specific: Return expected artifact patterns
+get_expected_artifacts() {
+    printf "%s\n" "$PROJECT_DIR/release/*.exe" "$PROJECT_DIR/release/*.zip"
+}
+
+# Platform-specific: Install system dependencies
+install_system_deps() {
+    # Windows: install via Chocolatey if available
+    if command -v choco.exe &>/dev/null || command -v choco &>/dev/null; then
+        choco install cmake ffmpeg -y --installargs 'ADD_CMAKE_TO_PATH=System' || echo "Chocolatey install may have failed, continuing..."
+    else
+        echo_warning "Chocolatey not found - skipping system package installation"
+        echo "  Make sure cmake and ffmpeg are already in PATH"
+    fi
+}
+
+# Platform-specific: Bundle Python runtime
+bundle_python_impl() {
+    # Windows: download embeddable Python
+    PYTHON_VERSION=$(python3 "$SCRIPT_DIR/parse-build-config.py" "$CONFIG" .versions.python)
+    PYTHON_MAJOR="${PYTHON_VERSION%%.*}"
+    PYTHON_MINOR="${PYTHON_VERSION#*.}"
+    PYTHON_EMBED_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-embed-amd64.zip"
+    
+    echo "Downloading Python embeddable..."
+    local curl_status=0
+    curl -sL --fail --retry 5 --retry-delay 5 --retry-all-errors "$PYTHON_EMBED_URL" -o /tmp/python-embed.zip || curl_status=$?
+    if [[ "$curl_status" -ne 0 ]]; then
+        echo_error "Failed to download Python embeddable package"
+        echo "  URL: $PYTHON_EMBED_URL"
+        echo "  curl exit code: $curl_status"
+        exit 1
+    fi
+    
+    # Wipe the existing python dir before extracting so a re-run doesn't
+    # leave stale files (e.g. an old ._pth from a previous Python version)
+    # mixed in with the freshly-extracted embeddable distribution.
+    rm -rf "$PROJECT_DIR/resources/python"
+    mkdir -p "$PROJECT_DIR/resources/python"
+    unzip -q /tmp/python-embed.zip -d "$PROJECT_DIR/resources/python/"
+
+    # Enable site-packages by editing the ._pth file
+    # IMPORTANT: On Windows embeddable Python, PYTHONPATH environment variable is IGNORED
+    # when a ._pth file exists (isolated mode). We must add paths directly to the .pth file.
+    # The embeddable zip is supposed to ship a ._pth file; if it doesn't,
+    # the rest of the script's PATH-injection won't work, so fail fast.
+    PTH_FILE=$(find "$PROJECT_DIR/resources/python" -name "*._pth" | head -1)
+    if [[ -z "$PTH_FILE" ]]; then
+        echo_error "No ._pth file found in extracted embeddable Python — upstream zip layout may have changed"
+        exit 1
+    fi
+    if [[ -n "$PTH_FILE" ]]; then
+        # Enable site-packages
+        sed -i 's/#import site/import site/' "$PTH_FILE"
+        echo "Lib/site-packages" >> "$PTH_FILE"
+        # Add Slopsmith paths (relative to resources/python)
+        # These must be in the .pth file since PYTHONPATH is ignored in isolated mode
+        echo "# Slopsmith modules (relative to resources/python)" >> "$PTH_FILE"
+        echo "../slopsmith" >> "$PTH_FILE"
+        echo "../slopsmith/lib" >> "$PTH_FILE"
+    fi
+    
+    # Install pip
+    echo "Downloading pip..."
+    if ! curl -sL --fail --retry 5 --retry-delay 5 --retry-all-errors \
+        https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py; then
+        echo_error "Failed to download pip installer"
+        exit 1
+    fi
+    "$PROJECT_DIR/resources/python/python.exe" /tmp/get-pip.py --quiet --no-cache-dir
+
+# Install packages
+# Install build tools first (required for building from source on Windows embeddable Python)
+"$PROJECT_DIR/resources/python/python.exe" -m pip install --quiet --no-cache-dir \
+        setuptools wheel
+# Install slopsmith runtime requirements (single source of truth —
+# drift used to silently break desktop builds whenever slopsmith added
+# a dep), then desktop-only extras. SLOPSMITH_DIR is exported by
+# clone_slopsmith() in build-common.sh; fall back to local-dev paths
+# to match bundle-slopsmith.sh's discovery so this works outside CI.
+if [[ -z "${SLOPSMITH_DIR:-}" ]]; then
+    if [[ -d "$PROJECT_DIR/../slopsmith" ]]; then
+        SLOPSMITH_DIR="$PROJECT_DIR/../slopsmith"
+    elif [[ -d "$HOME/Repositories/slopsmith" ]]; then
+        SLOPSMITH_DIR="$HOME/Repositories/slopsmith"
+    fi
+fi
+if [[ -z "${SLOPSMITH_DIR:-}" ]] || [[ ! -f "$SLOPSMITH_DIR/requirements.txt" ]]; then
+    echo "ERROR: slopsmith requirements.txt not found (SLOPSMITH_DIR=${SLOPSMITH_DIR:-<unset>})." >&2
+    echo "       Expected SLOPSMITH_DIR to be exported by clone_slopsmith() in build-common.sh," >&2
+    echo "       or slopsmith cloned next to this repo." >&2
+    exit 1
+fi
+"$PROJECT_DIR/resources/python/python.exe" -m pip install --quiet --no-cache-dir \
+        -r "$SLOPSMITH_DIR/requirements.txt"
+"$PROJECT_DIR/resources/python/python.exe" -m pip install --quiet --no-cache-dir \
+        -r "$PROJECT_DIR/.packages/python.txt"
+}
+
+# Usage: download_with_retries <url> <output_path> <description>
+download_with_retries() {
+    local url="$1"
+    local output_path="$2"
+    local description="$3"
+    local max_attempts=3
+    local attempt=1
+    local delay=10
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        echo "  Downloading $description (attempt $attempt/$max_attempts)..."
+        if curl -sL --fail --max-time 120 "$url" -o "$output_path"; then
+            echo "    Successfully downloaded $description"
+            return 0
+        fi
+        
+        local exit_code=$?
+        echo "    Download failed with exit code $exit_code"
+        
+        if [[ $attempt -lt $max_attempts ]]; then
+            echo "    Retrying in ${delay}s..."
+            sleep $delay
+            delay=$((delay * 2))
+        fi
+        
+        attempt=$((attempt + 1))
+    done
+    
+    echo_error "Failed to download $description after $max_attempts attempts"
+    return 1
+}
+
+# Platform-specific: Bundle system binaries
+# These binaries are REQUIRED for core functionality. The build will fail
+# if downloads don't succeed after multiple retry attempts.
+bundle_binaries_impl() {
+    mkdir -p "$PROJECT_DIR/resources/bin"
+    
+    # ffmpeg static build
+    echo "Downloading ffmpeg..."
+    if ! download_with_retries \
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" \
+        "/tmp/ffmpeg.zip" \
+        "ffmpeg"; then
+        exit 1
+    fi
+    unzip -q /tmp/ffmpeg.zip -d /tmp/ffmpeg
+    # Validate the expected layout instead of `cp ... || true` — a broken
+    # / changed zip layout would otherwise drop `ffmpeg.exe` silently and
+    # surface as a less-direct error in `verify_bundled_binaries`.
+    FFMPEG_BIN=$(find /tmp/ffmpeg -name 'ffmpeg.exe' -type f | head -1)
+    if [[ -z "$FFMPEG_BIN" ]]; then
+        echo_error "ffmpeg.exe not found after extracting /tmp/ffmpeg.zip — upstream zip layout may have changed"
+        exit 1
+    fi
+    cp "$FFMPEG_BIN" "$PROJECT_DIR/resources/bin/"
+
+    # ffprobe ships in the same BtbN zip as ffmpeg. demucs's audio loader
+    # spawns ffprobe before ffmpeg to read stream metadata; without it the
+    # loader dies with FileNotFoundError before ffmpeg is ever invoked.
+    FFPROBE_BIN=$(find /tmp/ffmpeg -name 'ffprobe.exe' -type f | head -1)
+    if [[ -z "$FFPROBE_BIN" ]]; then
+        echo_error "ffprobe.exe not found after extracting /tmp/ffmpeg.zip — upstream zip layout may have changed"
+        exit 1
+    fi
+    cp "$FFPROBE_BIN" "$PROJECT_DIR/resources/bin/"
+
+    # vgmstream-cli
+    echo "Downloading vgmstream-cli..."
+    if ! download_with_retries \
+        "https://github.com/vgmstream/vgmstream/releases/latest/download/vgmstream-win64.zip" \
+        "/tmp/vgmstream.zip" \
+        "vgmstream-cli"; then
+        exit 1
+    fi
+    unzip -q /tmp/vgmstream.zip -d /tmp/vgmstream
+    VGMSTREAM_EXE="/tmp/vgmstream/vgmstream-cli.exe"
+    shopt -s nullglob
+    VGMSTREAM_DLLS=("/tmp/vgmstream"/*.dll)
+    shopt -u nullglob
+    if [[ ! -f "$VGMSTREAM_EXE" ]]; then
+        echo_error "vgmstream-cli.exe not found at $VGMSTREAM_EXE after extraction"
+        exit 1
+    fi
+    if [[ ${#VGMSTREAM_DLLS[@]} -eq 0 ]]; then
+        echo_error "Expected vgmstream DLLs in /tmp/vgmstream after extraction but found none"
+        exit 1
+    fi
+    cp "$VGMSTREAM_EXE" "$PROJECT_DIR/resources/bin/"
+    cp "${VGMSTREAM_DLLS[@]}" "$PROJECT_DIR/resources/bin/"
+    
+    # fluidsynth
+    echo "Downloading fluidsynth..."
+    # Reuse parse-build-config.py — Git Bash auto-converts the MSYS-style
+    # $CONFIG path to native Windows form when it's passed as an arg, but
+    # NOT when it's interpolated into an inline `python -c "...open('$CONFIG')..."`
+    # string. The previous inline form silently failed with set -e on
+    # Windows because Python opened a "/d/a/.../config.json" path that
+    # doesn't exist as a literal Windows path.
+    FS_URL=$(python3 "$SCRIPT_DIR/parse-build-config.py" "$CONFIG" .external.fluidsynth_windows.url 2>/dev/null || true)
+    if [[ -n "$FS_URL" ]]; then
+        if ! download_with_retries \
+            "$FS_URL" \
+            "/tmp/fluidsynth.zip" \
+            "fluidsynth"; then
+            exit 1
+        fi
+        unzip -q /tmp/fluidsynth.zip -d /tmp/fluidsynth
+        FS_BIN=$(find /tmp/fluidsynth -name 'fluidsynth.exe' -type f | head -1)
+        if [[ -n "$FS_BIN" ]]; then
+            cp "$FS_BIN" "$PROJECT_DIR/resources/bin/"
+            cp "$(dirname "$FS_BIN")"/*.dll "$PROJECT_DIR/resources/bin/" 2>/dev/null || true
+        fi
+    else
+        echo_error "Fluidsynth URL not found in build config"
+        exit 1
+    fi
+    
+    echo_summary "All required Windows binaries downloaded and installed"
+}
+
+# Run the build
+main "$@"
