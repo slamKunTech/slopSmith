@@ -1,0 +1,120 @@
+{
+  "name": "slopsmith-desktop",
+  "version": "0.2.8",
+  "description": "Slopsmith desktop app with integrated audio engine, VST hosting, and amp modeling",
+  "author": {
+    "name": "Byron",
+    "email": "byron@ougsoft.com"
+  },
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build:ts": "tsc && node -e \"const fs=require('fs'),path=require('path');fs.copyFileSync('src/main/splash.html','dist/main/splash.html');fs.copyFileSync('src/main/spinner.json','dist/main/spinner.json');fs.copyFileSync('node_modules/lottie-web/build/player/lottie.min.js','dist/main/lottie.min.js');const dst='dist/main/images';if(fs.existsSync(dst))fs.rmSync(dst,{recursive:true});fs.mkdirSync(dst,{recursive:true});fs.readdirSync('src/main/images',{withFileTypes:true}).filter(d=>d.isFile()&&d.name.endsWith('.webp')).forEach(d=>fs.copyFileSync(path.join('src/main/images',d.name),path.join(dst,d.name)))\"",
+    "build:audio": "bash scripts/build-audio.sh Release",
+    "build:audio:debug": "bash scripts/build-audio.sh Debug",
+    "rebuild:audio": "rm -rf build &amp;&amp; bash scripts/build-audio.sh Release",
+    "build:rscli": "bash scripts/build-rscli.sh",
+    "build:native": "npm run build:audio && npm run build:rscli",
+    "bundle:slopsmith": "bash scripts/bundle-slopsmith.sh",
+    "bundle:python": "bash scripts/bundle-python.sh",
+    "bundle:binaries": "bash scripts/bundle-binaries.sh",
+    "bundle:soundfont": "bash scripts/bundle-soundfont.sh",
+    "bundle": "bash scripts/bundle.sh",
+    "start": "npm run build:ts && electron .",
+    "dev": "npm run build:ts && electron .",
+    "dist": "npm run build:native && npm run bundle && npm run build:ts && electron-builder",
+    "dist:linux": "npm run dist -- --linux",
+    "dist:mac": "npm run dist -- --mac",
+    "dist:win": "npm run dist -- --win",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "build": {
+    "appId": "com.byron.slopsmith-desktop",
+    "productName": "Slopsmith",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "build/Release/*.node"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/slopsmith",
+        "to": "slopsmith"
+      },
+      {
+        "from": "resources/python",
+        "to": "python"
+      },
+      {
+        "from": "resources/bin",
+        "to": "bin"
+      },
+      {
+        "from": "resources/default-irs",
+        "to": "default-irs"
+      },
+      {
+        "from": "resources/soundfonts",
+        "to": "soundfonts"
+      }
+    ],
+    "asarUnpack": [
+      "build/Release/*.node"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Audio",
+      "icon": "resources/icons"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.music",
+      "icon": "resources/icons/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "resources/entitlements.mac.plist",
+      "entitlementsInherit": "resources/entitlements.mac.plist",
+      "notarize": true,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Slopsmith needs microphone access for guitar input and note detection."
+      }
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "resources/icons/icon.ico",
+      "files": [
+        "build/Release/slopsmith-vst-host.exe"
+      ],
+      "asarUnpack": [
+        "build/Release/slopsmith-vst-host.exe"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "lottie-web": "^5.13.0",
+    "node-addon-api": "^8.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "cmake-js": "^7.3.0",
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.0"
+  },
+  "cmake-js": {
+    "runtime": "electron"
+  }
+}

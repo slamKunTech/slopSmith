@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+# lib/ has no __init__.py — the project uses flat imports like `from song import …`
+# from anywhere on sys.path. Add both the repo root (for tests themselves) and lib/
+# (for the modules under test).
+pythonpath = [".", "lib"]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
