@@ -1,0 +1,12 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+pycryptodome>=3.15.0
+pyguitarpro>=0.10.1
+cloudscraper>=1.2.71
+curl_cffi>=0.7.0
+midiutil>=1.2.1
+mido>=1.3.0
+Pillow>=10.0.0
+PyYAML>=6.0
+python-multipart>=0.0.9

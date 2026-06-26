@@ -1,0 +1,31 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount your Rocksmith DLC folder (adjust path for your system)
+      - ${DLC_PATH:-~/.local/share/Steam/steamapps/common/Rocksmith2014/dlc}:/dlc
+      # Persistent config and cache
+      - rocksmith-config:/config
+      # Mount source for live reload during development
+      - ./static:/app/static
+      - ./server.py:/app/server.py
+      - ./VERSION:/app/VERSION
+      - ./ug_browser.py:/app/ug_browser.py
+      - ./lib:/app/lib
+      - ./plugins:/app/plugins
+      # Optional: mount Firefox profile for CustomsForge auth
+      # - ~/.mozilla/firefox:/firefox:ro
+    environment:
+      - PYTHONPATH=/app/lib:/app
+      - DLC_DIR=/dlc
+      - CONFIG_DIR=/config
+      - RSCLI_PATH=/opt/rscli/RsCli
+      - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+volumes:
+  rocksmith-config:

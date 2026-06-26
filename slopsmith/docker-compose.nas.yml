@@ -1,0 +1,21 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # CDLC library folder on NAS
+      - /volume1/piracy/cdlc:/dlc
+      # Persistent config, cache, favorites, loops, practice data
+      - slopsmith-config:/config
+    environment:
+      - DLC_DIR=/dlc
+      - CONFIG_DIR=/config
+      - RSCLI_PATH=/opt/rscli/RsCli
+      - DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+    restart: unless-stopped
+
+volumes:
+  slopsmith-config:

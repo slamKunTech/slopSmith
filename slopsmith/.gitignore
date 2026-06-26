@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+static/*.ogg
+static/*.mp3
+static/*.wav
+static/art/
+static/audio_*
+plugins/*/
+!plugins/__init__.py
