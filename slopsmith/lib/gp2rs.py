@@ -1,11 +1,25 @@
 """Convert Guitar Pro files (.gp5/.gp4/.gp3) to Rocksmith 2014 arrangement XML."""
 
+import re
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import guitarpro
+
+
+def _extract_year(copyright: str | None) -> str:
+    """Extract a 4-digit year from a GP copyright/notice string.
+
+    Some GP files (e.g. gtp.cn rips) put promo text in the copyright field
+    instead of a year. Rocksmith's ``<albumYear>`` must parse as an int, so
+    return the first plausible year (19xx/20xx) found, or "" if none.
+    """
+    if not copyright:
+        return ""
+    m = re.search(r"\b(19|20)\d{2}\b", str(copyright))
+    return m.group(0) if m else ""
 
 # Standard tuning MIDI values (high e to low E, GP string order 1-6)
 STANDARD_TUNING_6 = [64, 59, 55, 50, 45, 40]
@@ -373,7 +387,7 @@ def convert_track(
         title=song.title or "Untitled",
         artist=song.artist or "Unknown",
         album=song.album or "",
-        year=str(song.copyright) if song.copyright else "",
+        year=_extract_year(song.copyright),
         arrangement=arrangement_name,
         tuning=tuning,
         num_strings=num_strings,
@@ -819,7 +833,7 @@ def convert_piano_track(
         title=song.title or "Untitled",
         artist=song.artist or "Unknown",
         album=song.album or "",
-        year=str(song.copyright) if song.copyright else "",
+        year=_extract_year(song.copyright),
         arrangement=arrangement_name,
         tuning=[0] * 6,
         num_strings=6,
@@ -974,7 +988,7 @@ def convert_drum_track(
         title=song.title or "Untitled",
         artist=song.artist or "Unknown",
         album=song.album or "",
-        year=str(song.copyright) if song.copyright else "",
+        year=_extract_year(song.copyright),
         arrangement=arrangement_name,
         tuning=[0] * 6,
         num_strings=6,
