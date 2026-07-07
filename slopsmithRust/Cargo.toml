@@ -1,0 +1,102 @@
+[package]
+name = "slopsmith"
+version = "0.2.4"
+edition = "2021"
+description = "Browse and practice Rocksmith custom songs - Rust port"
+
+[lib]
+name = "slopsmith"
+path = "src/lib.rs"
+
+[[bin]]
+name = "slopsmith"
+path = "src/main.rs"
+
+[[bin]]
+name = "psarc-to-sloppak"
+path = "src/bin/psarc_to_sloppak.rs"
+
+[[bin]]
+name = "split-stems"
+path = "src/bin/split_stems.rs"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["ws", "multipart"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# SQLite
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# XML parsing
+quick-xml = { version = "0.31", features = ["serialize"] }
+
+# Crypto
+aes = "0.8"
+cfb-mode = "0.8"
+ctr = "0.9"
+cipher = "0.4"
+
+# Compression
+flate2 = "1"
+
+# MD5 hashing (PSARC TOC entries)
+md5 = "0.7"
+
+# Zip handling
+zip = "0.6"
+
+# Image processing
+image = "0.25"
+
+# MIDI
+midly = "0.5"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# File walking
+walkdir = "2"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Base64
+base64 = "0.22"
+
+# Regex
+regex = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = "0.4"
+
+# Tempfile
+tempfile = "3"
+
+# Glob
+glob = "0.3"
+
+# URL encoding
+percent-encoding = "2"
+
+# Ordered hashmap
+indexmap = { version = "2", features = ["serde"] }
+
+# Futures
+futures = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -11,3 +11,7 @@ plugins/*/
 
 # RsCli external tool (built, ~87M, not committed)
 lib/tools/
+
+# RsCli dotnet build artifacts (obj/bin from local restore/build)
+rscli/obj/
+rscli/bin/
