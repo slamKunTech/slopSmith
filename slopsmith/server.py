@@ -590,6 +590,11 @@ def startup_events():
 
 def startup_scan():
     """Start background metadata scan and periodic rescan on server start."""
+    # Pre-set the scan status synchronously so the desktop's first
+    # /api/startup-status poll sees running=True (the thread assignment in
+    # _background_scan would otherwise lose the race against a 700ms poll).
+    global _scan_status
+    _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "listing"}
     thread = threading.Thread(target=_background_scan, daemon=True)
     thread.start()
     # Periodic rescan every 5 minutes
@@ -625,6 +630,43 @@ def get_version():
 @app.get("/api/scan-status")
 def scan_status():
     return _scan_status
+
+
+@app.get("/api/startup-status")
+def startup_status():
+    """Startup progress for the desktop client's splash screen.
+
+    The desktop's splash polls this endpoint and closes once ``phase``
+    reaches ``complete`` or ``error`` with ``running=False``. The backend's
+    real startup work is the initial library scan (tracked in
+    ``_scan_status``), so we map scan state to the shape the desktop expects
+    (running/phase/message/current_plugin/loaded/total/error). There is no
+    phased plugin-loading step to report here, so ``current_plugin`` stays
+    empty and progress is surfaced via ``loaded``/``total``.
+    """
+    s = _scan_status
+    stage = s.get("stage", "idle")
+    if stage == "error":
+        phase, running = "error", False
+        message = s.get("error") or "Scan failed"
+    elif stage in ("complete", "idle"):
+        # 'idle' covers the no-DLC-configured case — the app is still
+        # usable (DLC can be set in settings), so don't surface it as an
+        # error on the splash.
+        phase, running = "complete", False
+        message = "Ready"
+    else:
+        phase, running = "scanning", True
+        message = f"Scanning library {s.get('done', 0)}/{s.get('total', 0)}"
+    return {
+        "running": running,
+        "phase": phase,
+        "message": message,
+        "current_plugin": "",
+        "loaded": int(s.get("done", 0)),
+        "total": int(s.get("total", 0)),
+        "error": s.get("error") if stage == "error" else None,
+    }
 
 
 @app.post("/api/rescan")
