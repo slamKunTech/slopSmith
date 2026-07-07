@@ -28,7 +28,7 @@ import yaml
 
 from patcher import unpack_psarc
 from song import load_song, arrangement_to_wire
-from audio import find_wem_files, _vgmstream_cmd, _ffmpeg_cmd
+from audio import find_wem_files, _vgmstream_cmd, _ffmpeg_cmd, encode_wav_to_ogg
 
 
 ProgressCB = Optional[Callable[[float, str, str], None]]
@@ -77,14 +77,7 @@ def _wem_to_ogg(wem_path: str, out_ogg: Path) -> None:
                 f"vgmstream-cli failed: {r.stderr.decode(errors='replace')}"
             )
         out_ogg.parent.mkdir(parents=True, exist_ok=True)
-        r2 = subprocess.run(
-            [ffmpeg, "-y", "-i", str(wav), "-c:a", "libvorbis", "-q:a", "5", str(out_ogg)],
-            capture_output=True,
-        )
-        if r2.returncode != 0 or not out_ogg.exists() or out_ogg.stat().st_size < 100:
-            raise RuntimeError(
-                f"ffmpeg OGG encode failed: {r2.stderr.decode(errors='replace')}"
-            )
+        encode_wav_to_ogg(wav, out_ogg, ffmpeg=ffmpeg)
 
 
 def _parse_lyrics(extracted_dir: Path) -> list[dict]:
@@ -367,18 +360,7 @@ def _run_demucs(full_ogg: Path, out_dir: Path, model: str) -> Path:
 
 
 def _encode_ogg(wav_path: Path, ogg_path: Path) -> None:
-    ffmpeg = _ffmpeg_cmd() or "ffmpeg"
-    ogg_path.parent.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(
-        [ffmpeg, "-y", "-i", str(wav_path),
-         "-c:a", "libvorbis", "-q:a", "5", str(ogg_path)],
-        capture_output=True,
-    )
-    if r.returncode != 0 or not ogg_path.exists():
-        raise RuntimeError(
-            f"ffmpeg OGG encode failed for {wav_path.name}: "
-            f"{r.stderr.decode(errors='replace')}"
-        )
+    encode_wav_to_ogg(wav_path, ogg_path, quality=5)
 
 
 def _rewrite_stems_manifest(source_dir: Path, new_stems: list[dict]) -> None:
