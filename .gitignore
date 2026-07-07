@@ -1,2 +1,16 @@
 .ai-code-tracker.json
 .vscode/
+
+# Build outputs — defensive catch-all at repo root. Each subproject
+# (slopsmith/, slopsmith-desktop/, slopsmithRust/) already ignores its own
+# build artifacts; these entries keep the root safe if anyone runs a build
+# here directly. No build artifacts are tracked today, so this changes
+# nothing that's committed.
+build/
+dist/
+release/
+target/
+*.node
+
+# OS
+.DS_Store
