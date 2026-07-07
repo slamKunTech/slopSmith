@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,10 @@ import zipfile
 from pathlib import Path
 
 import yaml
+
+# Make `lib/` importable when run as a standalone script.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+from audio import encode_wav_to_ogg  # noqa: E402
 
 
 # Demucs outputs WAVs named {stem}.wav in a per-track subfolder. We re-encode
@@ -68,16 +73,7 @@ def _run_demucs(full_ogg: Path, out_dir: Path, model: str) -> Path:
 
 def _encode_ogg(wav_path: Path, ogg_path: Path) -> None:
     ogg_path.parent.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(wav_path),
-         "-c:a", "libvorbis", "-q:a", "5", str(ogg_path)],
-        capture_output=True,
-    )
-    if r.returncode != 0 or not ogg_path.exists():
-        raise RuntimeError(
-            f"ffmpeg OGG encode failed for {wav_path.name}: "
-            f"{r.stderr.decode(errors='replace')}"
-        )
+    encode_wav_to_ogg(wav_path, ogg_path)
 
 
 def _rewrite_manifest(source_dir: Path, new_stems: list[dict]) -> None:
