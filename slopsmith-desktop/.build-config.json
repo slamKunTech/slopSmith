@@ -9,7 +9,7 @@
   },
   "external": {
     "rs2014net": {
-      "repo": "byrongamatos/Rocksmith2014.NET",
+      "repo": "iminashi/Rocksmith2014.NET",
       "commit": "73a42e71643fc27c2d280cf577cb291e9b91c59a"
     },
     "fluidsynth_windows": {
