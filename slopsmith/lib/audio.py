@@ -16,6 +16,46 @@ def _ffmpeg_cmd() -> str | None:
     return shutil.which("ffmpeg")
 
 
+def encode_wav_to_ogg(
+    wav_path: str | Path,
+    ogg_path: str | Path,
+    quality: int = 5,
+    ffmpeg: str | None = None,
+) -> None:
+    """Encode a WAV (or any ffmpeg-decodable audio) to Ogg/Vorbis.
+
+    Prefers the ``libvorbis`` encoder; falls back to ffmpeg's built-in
+    (experimental) ``vorbis`` encoder when the ffmpeg build doesn't link
+    libvorbis (e.g. stock Homebrew ffmpeg). Raises RuntimeError on failure.
+    """
+    ff = ffmpeg or _ffmpeg_cmd() or "ffmpeg"
+    ogg_path = Path(ogg_path)
+    ogg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Primary: libvorbis
+    r = subprocess.run(
+        [ff, "-y", "-loglevel", "error", "-i", str(wav_path),
+         "-c:a", "libvorbis", "-q:a", str(quality), str(ogg_path)],
+        capture_output=True,
+    )
+    if r.returncode == 0 and ogg_path.exists() and ogg_path.stat().st_size > 0:
+        return
+
+    # Fallback: native vorbis (experimental -> needs -strict -2)
+    if ogg_path.exists() and ogg_path.stat().st_size == 0:
+        ogg_path.unlink()
+    r2 = subprocess.run(
+        [ff, "-y", "-loglevel", "error", "-i", str(wav_path),
+         "-c:a", "vorbis", "-strict", "-2", "-q:a", str(quality), str(ogg_path)],
+        capture_output=True,
+    )
+    if r2.returncode != 0 or not ogg_path.exists() or ogg_path.stat().st_size < 100:
+        raise RuntimeError(
+            f"ffmpeg OGG/Vorbis encode failed for {Path(wav_path).name}: "
+            f"{r2.stderr.decode(errors='replace')[-400:]}"
+        )
+
+
 def find_wem_files(extracted_dir: str) -> list[str]:
     """Find WEM audio files, sorted largest first (full song before preview)."""
     wem_files = list(Path(extracted_dir).rglob("*.wem"))
