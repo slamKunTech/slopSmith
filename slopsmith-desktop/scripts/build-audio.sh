@@ -12,6 +12,32 @@ BUILD_TYPE="${1:-Release}"
 
 cd "$PROJECT_DIR"
 
+# Sanitize the compiler environment on macOS. Homebrew's llvm on PATH
+# exports CPLUS_INCLUDE_PATH/CXXFLAGS that prepend its libc++ headers ahead
+# of the SDK's, clashing with Apple clang and producing
+# "<cwchar> tried including <wchar.h> but didn't find libc++'s <wchar.h>"
+# even when CC=/usr/bin/clang is set. These vars are irrelevant to the JUCE
+# audio build (wasmedge/llvm paths belong to other projects), so strip them
+# and prefer Apple clang unless the caller set CC/CXX explicitly.
+if [ "$(uname -s)" = "Darwin" ]; then
+    unset CPLUS_INCLUDE_PATH C_INCLUDE_PATH CXXFLAGS CFLAGS CPPFLAGS
+    [ -z "${CC:-}" ] && export CC=/usr/bin/clang
+    [ -z "${CXX:-}" ] && export CXX=/usr/bin/clang++
+fi
+
+# Switching build types requires a fresh configure — cmake-js reuses the
+# cached CMAKE_BUILD_TYPE otherwise ("ninja: no work to do" leaves the prior
+# .node in place and the -C CMAKE_BUILD_TYPE flag is silently ignored).
+# If the cache's build type differs from the requested one, wipe build/.
+if [ -f "build/CMakeCache.txt" ]; then
+    CACHED_TYPE=$(grep -E "^CMAKE_BUILD_TYPE:STRING=" build/CMakeCache.txt \
+        | cut -d= -f2 | tr -d ' ')
+    if [ -n "$CACHED_TYPE" ] && [ "$CACHED_TYPE" != "$BUILD_TYPE" ]; then
+        echo "Build type changed ($CACHED_TYPE -> $BUILD_TYPE); wiping build/ to reconfigure."
+        rm -rf build
+    fi
+fi
+
 # Ensure JUCE submodule is available
 if [ ! -f "JUCE/CMakeLists.txt" ]; then
     echo "Initializing JUCE submodule..."
