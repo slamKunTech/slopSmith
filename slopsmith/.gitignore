@@ -8,3 +8,6 @@ static/art/
 static/audio_*
 plugins/*/
 !plugins/__init__.py
+
+# RsCli external tool (built, ~87M, not committed)
+lib/tools/
