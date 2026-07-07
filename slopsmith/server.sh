@@ -1,19 +1,12 @@
+#!/usr/bin/env bash
+# Dev launcher for the slopsmith FastAPI server (+ pytest snippets).
+# All paths are relative to this script, so it runs from any cwd.
+set -euo pipefail
 
-cd /Users/mac/codes/slopSmith/slopsmith
+cd "$(dirname "$0")"
 
-# 运行所有测试
-#pytest
+# Run all tests:        pytest
+# Specific file:        pytest tests/test_song.py -v
+# Pattern match:        pytest -k "round_trip" -v
 
-# 运行特定文件
-pytest tests/test_song.py -v
-
-# 按模式匹配
-pytest -k "round_trip" -v
-
-cd /Users/mac/codes/slopSmith/slopsmith
-PYTHONPATH=$PWD:$PWD/lib .venv/bin/uvicorn server:app --host 0.0.0.0 --port 8001
-
-
-
-
-
+PYTHONPATH="$PWD:$PWD/lib" .venv/bin/uvicorn server:app --host 0.0.0.0 --port 8001
