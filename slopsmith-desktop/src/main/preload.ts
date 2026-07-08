@@ -178,7 +178,8 @@ contextBridge.exposeInMainWorld('slopsmithDesktop', {
         getStatus: () => ipcRenderer.invoke('soundfont:getStatus'),
         downloadHighQuality: () => ipcRenderer.invoke('soundfont:downloadHighQuality'),
         cancelDownload: () => ipcRenderer.invoke('soundfont:cancelDownload'),
-        setQuality: (quality: 'default' | 'high') => ipcRenderer.invoke('soundfont:setQuality', quality),
+        setQuality: (quality: 'default' | 'high' | 'custom') => ipcRenderer.invoke('soundfont:setQuality', quality),
+        setCustomPath: (filePath: string) => ipcRenderer.invoke('soundfont:setCustomPath', filePath),
         onDownloadProgress: (
             callback: (progress: { bytesDownloaded: number; totalBytes: number; percent: number }) => void,
         ) => {

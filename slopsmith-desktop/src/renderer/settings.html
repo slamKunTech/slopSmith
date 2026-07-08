@@ -25,6 +25,17 @@
                     <span id="ae-sf-high-status" class="block text-xs text-slate-500">Not downloaded yet.</span>
                 </span>
             </label>
+            <label class="flex items-start gap-2 text-sm text-slate-300 cursor-pointer">
+                <input type="radio" name="ae-sf-quality" value="custom" id="ae-sf-custom" class="mt-1 accent-blue-500">
+                <span class="flex-1">
+                    <span class="block">Custom — use a specific .sf2 file</span>
+                    <span class="block text-xs text-slate-500">Pick any SoundFont (.sf2) on your computer for Guitar Pro → audio rendering.</span>
+                    <div class="mt-1 flex gap-2">
+                        <input type="text" id="ae-sf-custom-path" placeholder="Current: bundled GeneralUser GS" class="flex-1 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs">
+                        <button id="ae-pick-sf" type="button" class="px-2 py-1 rounded bg-slate-600 hover:bg-slate-500 text-xs">Browse</button>
+                    </div>
+                </span>
+            </label>
         </div>
         <div class="mt-2 flex items-center gap-2">
             <button id="ae-sf-download" class="px-3 py-1.5 rounded bg-slate-600 hover:bg-slate-500 text-sm">Download 142 MB</button>
