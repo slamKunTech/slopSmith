@@ -42,8 +42,29 @@ echo "  Source: https://github.com/$RS2014_REPO @ $RS2014_COMMIT"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-git clone --quiet "https://github.com/$RS2014_REPO.git" "$TMP_DIR/rs2014net"
-git -C "$TMP_DIR/rs2014net" checkout --quiet "$RS2014_COMMIT"
+# Resolve the clone URL. Default is direct GitHub; allow a mirror override
+# for networks with poor GitHub connectivity (e.g. behind the GFW) via
+# either a full URL (RS2014_GIT_URL) or a prefix (GITHUB_MIRROR_PREFIX,
+# e.g. "https://gh-proxy.com/"). Mirrors are opt-in to keep the default
+# build reproducible and trust GitHub directly.
+GIT_URL="https://github.com/$RS2014_REPO.git"
+if [ -n "${RS2014_GIT_URL:-}" ]; then
+    GIT_URL="$RS2014_GIT_URL"
+elif [ -n "${GITHUB_MIRROR_PREFIX:-}" ]; then
+    GIT_URL="${GITHUB_MIRROR_PREFIX}https://github.com/$RS2014_REPO.git"
+fi
+echo "  Git URL: $GIT_URL"
+
+# Force HTTP/1.1 to dodge "Error in the HTTP2 framing layer" failures some
+# networks hit against GitHub. Shallow-fetch the pinned commit directly —
+# far less data than a full clone and avoids pulling history.
+git init --quiet "$TMP_DIR/rs2014net"
+if ! git -C "$TMP_DIR/rs2014net" -c http.version=HTTP/1.1 fetch --depth=1 --quiet \
+        "$GIT_URL" "$RS2014_COMMIT"; then
+    echo "  Shallow fetch of pinned commit failed; falling back to full clone" >&2
+    git -c http.version=HTTP/1.1 clone --quiet "$GIT_URL" "$TMP_DIR/rs2014net"
+fi
+git -C "$TMP_DIR/rs2014net" -c advice.detachedHead=false checkout --quiet "$RS2014_COMMIT"
 
 cd "$TMP_DIR/rs2014net/tools/RsCli"
 echo "  Running dotnet publish"

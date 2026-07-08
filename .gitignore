@@ -12,5 +12,16 @@ release/
 target/
 *.node
 
+# Backups / temp (e.g. build-macos.sh NO_NOTARIZE leaves package.json.bak.nota
+# if killed mid-build; *.bak* keeps them out of the tree)
+*.bak
+*.bak.*
+
+# Logs
+*.log
+
+# Temp workdirs
+.tmp/
+
 # OS
 .DS_Store

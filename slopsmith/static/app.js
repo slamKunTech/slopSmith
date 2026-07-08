@@ -5,7 +5,10 @@ function showScreen(id) {
     if (id === 'home') loadLibrary();
     if (id === 'favorites') loadFavorites();
     if (id === 'settings') loadSettings();
-    if (id !== 'player') {
+    // Free Play keeps its own canvas+rAF alive (like the player keeps
+    // highway). Don't tear it down when *entering* freeplay; only stop it
+    // when navigating away to something else.
+    if (id !== 'player' && id !== 'freeplay') {
         highway.stop();
         const audio = document.getElementById('audio');
         audio.pause();
@@ -13,6 +16,8 @@ function showScreen(id) {
         isPlaying = false;
         document.getElementById('btn-play').textContent = '▶ Play';
     }
+    if (id !== 'freeplay' && window.freeplay) window.freeplay.stop();
+    if (id === 'freeplay' && window.freeplay) window.freeplay.start();
     window.scrollTo(0, 0);
     if (window.slopsmith) window.slopsmith.emit('screen:changed', { id });
 }
