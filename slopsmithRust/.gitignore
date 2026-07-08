@@ -1,5 +1,0 @@
-# Rust / Cargo build artifacts
-/target
-
-# Cargo target debug/release output
-**/*.rs.bk
