@@ -26,10 +26,12 @@ const SOUNDFONT_EXPECTED_SIZE_MB = 142;
 
 // ── Config + path helpers ───────────────────────────────────────────────────
 
-export type SoundfontQuality = 'default' | 'high';
+export type SoundfontQuality = 'default' | 'high' | 'custom';
 
 interface DesktopConfig {
     soundfontQuality?: SoundfontQuality;
+    /** Absolute path to a user-picked .sf2 file; honoured when quality === 'custom'. */
+    soundfontCustomPath?: string | null;
 }
 
 function configPath(): string {
@@ -63,16 +65,54 @@ function highQualityPath(): string {
 }
 
 /**
+ * Absolute path of the bundled default soundfont
+ * (`<RESOURCESPATH>/soundfonts/*.sf2`), matching the core's
+ * `_find_soundfont()` fallback. Used as the placeholder shown in the
+ * Custom path input — "the sf2 currently in use" when nothing else is
+ * active. Returns `null` if the bundled dir can't be read.
+ */
+function bundledSoundfontPath(): string | null {
+    const dir = path.join(
+        app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', 'resources'),
+        'soundfonts',
+    );
+    try {
+        const matches = fs.readdirSync(dir)
+            .filter(f => f.toLowerCase().endsWith('.sf2'))
+            .sort();
+        return matches.length ? path.join(dir, matches[0]) : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Returns the absolute path that `python.ts` should export as
  * `SLOPSMITH_SOUNDFONT`, or `null` to let the core's `_find_soundfont()`
  * fall through to the bundled GeneralUser GS in `RESOURCESPATH/soundfonts/`.
  */
 export function getActiveSoundfontPath(): string | null {
     const cfg = getDesktopConfig();
+    if (cfg.soundfontQuality === 'custom' && cfg.soundfontCustomPath && fs.existsSync(cfg.soundfontCustomPath)) {
+        return cfg.soundfontCustomPath;
+    }
     if (cfg.soundfontQuality === 'high' && fs.existsSync(highQualityPath())) {
         return highQualityPath();
     }
     return null;
+}
+
+/**
+ * Returns the soundfont path that is *actually* in effect right now —
+ * the active custom/high path if one is set, otherwise the bundled
+ * default. Used by the renderer to show "the sf2 file currently in use"
+ * as the Custom input's placeholder. Empty string if nothing resolves.
+ */
+export function getResolvedSoundfontPath(): string {
+    const active = getActiveSoundfontPath();
+    if (active) return active;
+    const bundled = bundledSoundfontPath();
+    return bundled || '';
 }
 
 // ── Download manager ────────────────────────────────────────────────────────
@@ -215,8 +255,16 @@ export function initSoundfontManager(getMainWindow: () => BrowserWindow | null):
         const cfg = getDesktopConfig();
         const highPath = highQualityPath();
         const highDownloaded = fs.existsSync(highPath);
+        const quality: SoundfontQuality =
+            cfg.soundfontQuality === 'high' || cfg.soundfontQuality === 'custom'
+                ? cfg.soundfontQuality
+                : 'default';
+        const customPath = cfg.soundfontCustomPath || null;
         return {
-            activeQuality: cfg.soundfontQuality === 'high' ? 'high' : 'default',
+            activeQuality: quality,
+            customPath,
+            customExists: !!(customPath && fs.existsSync(customPath)),
+            resolvedPath: getResolvedSoundfontPath(),
             highDownloaded,
             highPath: highDownloaded ? highPath : null,
             downloadInProgress: !!state.request || !!state.writeStream,
@@ -235,15 +283,34 @@ export function initSoundfontManager(getMainWindow: () => BrowserWindow | null):
     });
 
     ipcMain.handle('soundfont:setQuality', (_event, quality: SoundfontQuality) => {
-        if (quality !== 'default' && quality !== 'high') {
+        if (quality !== 'default' && quality !== 'high' && quality !== 'custom') {
             return { success: false, message: `Unknown quality: ${quality}` };
         }
         if (quality === 'high' && !fs.existsSync(highQualityPath())) {
             return { success: false, message: 'High-quality soundfont not downloaded yet' };
         }
+        if (quality === 'custom') {
+            const cfg = getDesktopConfig();
+            const p = cfg.soundfontCustomPath;
+            if (!p || !fs.existsSync(p)) {
+                return { success: false, message: 'No custom soundfont picked. Use Browse to choose a .sf2 file.' };
+            }
+        }
         setDesktopConfig({ soundfontQuality: quality });
         restartPython();
         return { success: true, message: 'Restarting audio engine…' };
+    });
+
+    // Pick a specific .sf2 file and activate it as the custom soundfont.
+    // Sets quality='custom' + the path atomically, then restarts Python so
+    // the new SLOPSMITH_SOUNDFONT takes effect.
+    ipcMain.handle('soundfont:setCustomPath', (_event, filePath: string) => {
+        if (!filePath || !fs.existsSync(filePath)) {
+            return { success: false, message: 'That file does not exist.' };
+        }
+        setDesktopConfig({ soundfontCustomPath: filePath, soundfontQuality: 'custom' });
+        restartPython();
+        return { success: true, message: 'Custom soundfont set. Restarting audio engine…' };
     });
 
     // Clean up any partial on quit so disk state stays tidy.
