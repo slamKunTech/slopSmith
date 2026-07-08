@@ -237,6 +237,20 @@ bundle_binaries_impl() {
     "$SCRIPT_DIR/sign-macos-binaries.sh"
 }
 
+# NO_NOTARIZE=1: skip macOS notarization for local builds without Apple
+# Developer credentials. electron-builder has no env override for the
+# `notarize` flag, so temporarily patch package.json and restore on exit.
+# (build-macos.sh already skips *signing* via CSC_IDENTITY_AUTO_DISCOVERY=
+# false when no identity is present; this additionally suppresses the
+# notarize step that would otherwise fail looking for APPLE_ID creds.)
+PKG="$PROJECT_DIR/package.json"
+if [[ -n "${NO_NOTARIZE:-}" ]] && grep -q '"notarize": true' "$PKG"; then
+    cp "$PKG" "$PKG.bak.nota"
+    sed -i '' 's/"notarize": true/"notarize": false/' "$PKG"
+    trap 'mv "$PKG.bak.nota" "$PKG" 2>/dev/null || true' EXIT
+    echo "NO_NOTARIZE set — notarization disabled for this build"
+fi
+
 # Run the build
 main "$@"
 
