@@ -828,6 +828,9 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
         const api = window.slopsmithDesktop?.soundfont;
         const defaultRadio = document.getElementById('ae-sf-default');
         const highRadio = document.getElementById('ae-sf-high');
+        const customRadio = document.getElementById('ae-sf-custom');
+        const customPathInput = document.getElementById('ae-sf-custom-path');
+        const pickSfBtn = document.getElementById('ae-pick-sf');
         const highStatus = document.getElementById('ae-sf-high-status');
         const downloadBtn = document.getElementById('ae-sf-download');
         const cancelBtn = document.getElementById('ae-sf-cancel');
@@ -852,6 +855,19 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
             defaultRadio.checked = status.activeQuality === 'default';
             highRadio.checked = status.activeQuality === 'high';
             highRadio.disabled = !status.highDownloaded;
+
+            if (customRadio) {
+                customRadio.checked = status.activeQuality === 'custom';
+            }
+            if (customPathInput) {
+                // Show the user-picked path if set; otherwise leave the
+                // input empty with a placeholder naming the sf2 currently
+                // in use (bundled default, or high if that's active).
+                customPathInput.value = status.customPath || '';
+                customPathInput.placeholder = status.resolvedPath
+                    ? `Current: ${status.resolvedPath}`
+                    : 'Current: bundled GeneralUser GS';
+            }
 
             if (status.highDownloaded) {
                 highStatus.textContent = `Downloaded. ${status.activeQuality === 'high' ? 'Active.' : 'Select to activate.'}`;
@@ -910,6 +926,27 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
         highRadio.addEventListener('change', () => {
             if (highRadio.checked) handleQualityChange('high');
         });
+
+        if (pickSfBtn) {
+            pickSfBtn.addEventListener('click', async () => {
+                const file = await window.slopsmithDesktop.pickFile([
+                    { name: 'SoundFont', extensions: ['sf2', 'sf3'] },
+                ]);
+                if (!file) return;
+                const result = await api.setCustomPath(file);
+                if (result.success) {
+                    showMessage(result.message, 'info');
+                } else {
+                    showMessage(result.message, 'error');
+                }
+                await refresh();
+            });
+        }
+        if (customRadio) {
+            customRadio.addEventListener('change', () => {
+                if (customRadio.checked) handleQualityChange('custom');
+            });
+        }
 
         api.onDownloadProgress(({ bytesDownloaded, totalBytes, percent }) => {
             progress.value = percent;

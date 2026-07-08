@@ -16,6 +16,12 @@ fluid-synth
 # Audio codec library required by vgmstream-cli
 speex
 
+# vgmstream-cli — bundled for vgm audio playback. The upstream GitHub
+# release asset `vgmstream-mac-cli.zip` was removed in r2117 (the
+# `releases/latest/download/...` URL 404s), so build-macos.sh copies the
+# binary from PATH instead. `brew install vgmstream` provides it.
+vgmstream
+
 # Used by the CI / local build to rewrite Mach-O load paths on the
 # bundled fluidsynth and vgmstream-cli binaries so they load their
 # dylibs via @executable_path instead of /opt/homebrew/lib.

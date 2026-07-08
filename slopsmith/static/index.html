@@ -40,6 +40,7 @@
             <div class="hidden md:flex items-center gap-8">
                 <a href="#library-section" onclick="showScreen('home')" class="text-sm text-gray-400 hover:text-white transition">Library</a>
                 <a href="#" onclick="showScreen('favorites');return false" class="text-sm text-gray-400 hover:text-white transition">Favorites</a>
+                <a href="#" onclick="showScreen('freeplay');return false" class="text-sm text-gray-400 hover:text-white transition">Free Play</a>
                 <span id="nav-plugins" class="contents"></span>
                 <a href="#" onclick="showScreen('settings');return false" class="text-sm text-gray-400 hover:text-white transition">Settings</a>
             </div>
@@ -52,6 +53,7 @@
             <div class="px-6 py-4 flex flex-col gap-3">
                 <a href="#library-section" onclick="showScreen('home');this.parentElement.parentElement.classList.add('hidden')" class="text-gray-400 hover:text-white">Library</a>
                 <a href="#" onclick="showScreen('favorites');this.parentElement.parentElement.classList.add('hidden');return false" class="text-gray-400 hover:text-white">Favorites</a>
+                <a href="#" onclick="showScreen('freeplay');this.parentElement.parentElement.classList.add('hidden');return false" class="text-gray-400 hover:text-white">Free Play</a>
                 <span id="mobile-nav-plugins" class="flex flex-col gap-2 border-t border-b border-gray-800 py-2 my-1">
                     <span class="text-xs text-gray-600 uppercase tracking-wider">Plugins</span>
                 </span>
@@ -301,6 +303,72 @@
     })();
     </script>
 
+    <!-- ══ FREE PLAY (live guitar input → scrolling highway) ════════════════ -->
+    <div id="freeplay" class="screen">
+        <canvas id="freeplay-canvas"></canvas>
+        <div id="freeplay-hud" class="absolute top-0 left-0 right-0 flex flex-wrap items-center gap-3 px-4 py-2.5 z-10">
+            <div class="text-sm tabular-nums">
+                <span id="fp-note" class="text-white font-semibold text-base">—</span>
+                <span id="fp-freq" class="text-gray-400 ml-2"></span>
+                <span id="fp-pos" class="text-gray-500 ml-2 text-xs"></span>
+            </div>
+            <div class="flex items-center gap-2 ml-auto flex-wrap">
+                <label class="text-xs text-gray-500" for="fp-device">Input</label>
+                <select id="fp-device" class="bg-dark-600 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none max-w-[150px]">
+                    <option value="">Default</option>
+                </select>
+                <label class="text-xs text-gray-500 ml-1" for="fp-tuning">Tuning</label>
+                <select id="fp-tuning" class="bg-dark-600 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none">
+                    <optgroup label="Standard">
+                        <option value="std-E">E Standard</option>
+                        <option value="std-Eb">E♭ Standard</option>
+                        <option value="std-D">D Standard</option>
+                        <option value="std-Cs">C♯ Standard</option>
+                        <option value="std-C">C Standard</option>
+                        <option value="std-B">B Standard</option>
+                        <option value="std-Bb">B♭ Standard</option>
+                        <option value="std-A">A Standard</option>
+                        <option value="std-F">F Standard</option>
+                        <option value="std-Fs">F♯ Standard</option>
+                    </optgroup>
+                    <optgroup label="Drop">
+                        <option value="drop-D">Drop D</option>
+                        <option value="drop-Cs">Drop C♯</option>
+                        <option value="drop-C">Drop C</option>
+                        <option value="drop-B">Drop B</option>
+                        <option value="drop-Bb">Drop B♭</option>
+                        <option value="drop-A">Drop A</option>
+                    </optgroup>
+                    <optgroup label="Open / other">
+                        <option value="ddrop-D">Double Drop D</option>
+                        <option value="open-G">Open G</option>
+                        <option value="open-D">Open D</option>
+                        <option value="dadgad">DADGAD</option>
+                        <option value="open-E">Open E</option>
+                    </optgroup>
+                </select>
+                <label class="text-xs text-gray-500 ml-1" for="fp-capo">Capo</label>
+                <input id="fp-capo" type="number" min="0" max="12" value="0" class="w-12 bg-dark-600 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none">
+                <span class="text-gray-700 mx-0.5">|</span>
+                <button id="fp-rec" onclick="window.freeplay.toggleRecord()" class="px-3 py-1.5 bg-red-900/40 hover:bg-red-900/60 rounded-lg text-xs text-red-300 transition">● Rec</button>
+                <button id="fp-play" onclick="window.freeplay.togglePlay()" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition" disabled>▶ Play</button>
+                <button id="fp-loop" onclick="window.freeplay.toggleLoop()" class="px-2 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-500 transition" title="Loop recording">🔁</button>
+                <button id="fp-clear" onclick="window.freeplay.clearSession()" class="px-2 py-1.5 bg-dark-600 hover:bg-red-900/50 rounded-lg text-xs text-gray-400 hover:text-red-400 transition" title="Clear recording">✕</button>
+                <span id="fp-rec-time" class="text-xs text-gray-500 tabular-nums w-16 text-right"></span>
+                <span class="text-gray-700 mx-0.5">|</span>
+                <button id="fp-exp-midi" onclick="window.freeplay.exportMidi()" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition" disabled title="Export session as MIDI">⬇ MIDI</button>
+                <button id="fp-exp-audio" onclick="window.freeplay.exportAudio()" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition" disabled title="Export recorded audio">⬇ Audio</button>
+                <button onclick="showScreen('home')" class="ml-1 px-3 py-1.5 bg-dark-600 hover:bg-red-900/50 rounded-lg text-xs text-gray-400 hover:text-red-400 transition">✕ Close</button>
+            </div>
+        </div>
+        <div id="freeplay-overlay" class="hidden absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
+            <div class="text-center max-w-md px-6">
+                <div id="fp-overlay-title" class="text-lg font-semibold text-gray-200 mb-2">Waiting for guitar input…</div>
+                <div id="fp-overlay-body" class="text-sm text-gray-500">Plug in your Rocksmith cable and pick it in the Input dropdown. Free Play captures it directly via Web Audio — no audio engine setup required.</div>
+            </div>
+        </div>
+    </div>
+
     <!-- ══ PLAYER ═════════════════════════════════════════════════════════ -->
     <div id="player" class="screen">
         <canvas id="highway"></canvas>
@@ -354,6 +422,7 @@
 
     <script src="/static/highway.js"></script>
     <script src="/static/app.js"></script>
+    <script src="/static/freeplay.js"></script>
     <script>
         // Navbar scroll effect
         window.addEventListener('scroll', () => {
