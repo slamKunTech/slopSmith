@@ -1,0 +1,6 @@
+# Pin this project to stable Rust. The crypto crates (aes/zeroize) pull in
+# zeroize_derive which requires edition2024 (Rust 1.85+); the user's default
+# nightly (1.83) is too old. This file scopes the toolchain to this project
+# only — it does not change the global default.
+[toolchain]
+channel = "stable"

@@ -1,0 +1,55 @@
+[package]
+name = "slopsmith-rs"
+version = "0.2.4"
+edition = "2021"
+description = "Rust backend for Slopsmith (drop-in replacement for the Python server.py)"
+publish = false
+
+[[bin]]
+name = "slopsmith-rs"
+path = "src/main.rs"
+
+[dependencies]
+# Web server + async runtime
+axum = { version = "0.8", features = ["ws", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+serde_yaml = "0.9"
+
+# Storage
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Binary formats (PSARC / SNG)
+aes = "0.8"
+flate2 = "1"
+md-5 = "0.10"
+zip = "2"
+
+# XML (RS arrangement + vocals root-tag detection)
+roxmltree = "0.20"
+regex = "1"
+
+# Filesystem scan
+walkdir = "2"
+
+# Art (DDS decode + base64 upload)
+image = "0.25"
+base64 = "0.22"
+
+# Sidecar reverse-proxy (plugins + GP import)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Errors / logging
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
