@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from patcher import pack_psarc
+from lib.patcher import pack_psarc
 
 RSCLI = Path(os.environ.get("RSCLI_PATH", str(Path(__file__).parent / "tools" / "rscli" / "RsCli")))
 WW2OGG = Path(__file__).parent / "tools" / "dlcbuilder-linux" / "Tools" / "ww2ogg"

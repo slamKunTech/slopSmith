@@ -208,3 +208,56 @@ html { scroll-behavior: smooth; }
     #player-controls button { padding: 4px 8px; font-size: 11px; }
     #volume { width: 50px; }
 }
+
+/* Library list view (paginated rows) */
+.lib-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.lib-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: linear-gradient(145deg, #10101e 0%, #0d0d18 100%);
+    border: 1px solid rgba(255,255,255,0.04);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+}
+.lib-row:hover {
+    border-color: rgba(64,128,224,0.2);
+    background: rgba(64,128,224,0.05);
+}
+.lib-row-art {
+    width: 48px;
+    height: 48px;
+    border-radius: 8px;
+    object-fit: cover;
+    background: #1a1a2e;
+    flex-shrink: 0;
+}
+.lib-row-placeholder {
+    width: 48px;
+    height: 48px;
+    border-radius: 8px;
+    background: #1a1a2e;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    opacity: 0.35;
+    display: none;
+}
+/* View toggle buttons */
+.view-btn {
+    cursor: pointer;
+}
+.view-btn:hover {
+    color: #fff;
+}
+.view-btn-active {
+    background: rgba(64,128,224,0.25) !important;
+    color: #fff !important;
+}

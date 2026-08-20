@@ -12,7 +12,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from patcher import unpack_psarc, pack_psarc
+from lib.patcher import unpack_psarc, pack_psarc
 
 RSCLI = Path(os.environ.get("RSCLI_PATH", str(Path(__file__).parent / "tools" / "rscli" / "RsCli")))
 

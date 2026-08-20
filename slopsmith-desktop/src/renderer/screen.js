@@ -963,15 +963,17 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
             { btn: 'ae-pick-dlc', input: 'ae-dlc-path', key: 'dlcDir' },
             { btn: 'ae-pick-nam', input: 'ae-nam-path', key: 'namDir' },
             { btn: 'ae-pick-ir', input: 'ae-ir-path', key: 'irDir' },
+            { btn: 'ae-pick-gp', input: 'ae-gp-path', key: 'gpDir',
+              def: '/Users/mac/Nutstore Files/donemidi/GuitarPro8GPTfiles', saveBtn: 'ae-save-gp' },
         ];
-        for (const { btn, input, key } of pickers) {
+        for (const { btn, input, key, def, saveBtn } of pickers) {
             const btnEl = $(btn);
             const inputEl = $(input);
             if (!btnEl || !inputEl) continue;
 
-            // Load saved value
+            // Load saved value (or default)
             const saved = localStorage.getItem('slopsmith-' + key);
-            if (saved) inputEl.value = saved;
+            inputEl.value = saved || def || '';
 
             btnEl.addEventListener('click', async () => {
                 const dir = await window.slopsmithDesktop.pickDirectory();
@@ -988,6 +990,16 @@ window.__slopsmithDesktopAudioHooks = window.__slopsmithDesktopAudioHooks || {};
                     }
                 }
             });
+
+            // Optional Save button: persist a manually-typed path
+            if (saveBtn) {
+                const saveEl = $(saveBtn);
+                if (saveEl) {
+                    saveEl.addEventListener('click', () => {
+                        localStorage.setItem('slopsmith-' + key, inputEl.value.trim());
+                    });
+                }
+            }
         }
     }
     setupPathPickers();

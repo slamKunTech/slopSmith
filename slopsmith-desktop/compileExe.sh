@@ -16,6 +16,9 @@
 # builds without Apple Developer credentials. Produces an unsigned,
 # unnotarized .dmg that runs on this machine (right-click → Open the
 # first time) but is blocked by Gatekeeper on other Macs.
+# --offline (or PIP_OFFLINE=1): reuse the existing Python runtime
+# instead of re-running pip install. First build must be online to
+# populate the runtime; subsequent offline builds skip pip entirely.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,16 +30,22 @@ export DOTNET_MULTILEVEL_LOOKUP=0
 export PATH="${DOTNET_ROOT}:${PATH}"
 
 # GitHub mirror for rs2014net (build:rscli clone).
-export RS2014_GIT_URL="https://gh-proxy.com/https://github.com/iminashi/Rocksmith2014.NET.git"
+# Disabled — gh-proxy.com is unreachable. Uncomment when proxy is back.
+# export RS2014_GIT_URL="https://gh-proxy.com/https://github.com/iminashi/Rocksmith2014.NET.git"
+# Also unset GITHUB_MIRROR_PREFIX in case it leaks from the shell environment
+# (e.g. export in .zshrc or a sourced proxy script).
+unset GITHUB_MIRROR_PREFIX
+unset RS2014_GIT_URL
 
 # Reuse the sibling slopsmith checkout (skip clone_slopsmith's network clone).
 export SLOPSMITH_DIR="${PROJECT_DIR}/../slopsmith"
 
-# --no-notarize flag → NO_NOTARIZE env (honored by build-macos.sh).
+# --no-notarize / --offline flag → env (honored by build-macos.sh).
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --no-notarize) export NO_NOTARIZE=1 ;;
+        --offline)     export PIP_OFFLINE=1 ;;
         *) ARGS+=("$arg") ;;
     esac
 done

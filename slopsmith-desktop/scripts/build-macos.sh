@@ -48,15 +48,79 @@ export YELLOW='\033[1;33m'
 export BLUE='\033[0;34m'
 export NC='\033[0m'
 
+# Pre-build cleanup: a previously-built DMG may still be mounted, and a
+# Slopsmith instance launched from that mounted DMG will hold the volume
+# open. electron-builder then fails its final `hdiutil detach` with exit
+# code 16 (resource busy) after exhausting retries. Kill any such app
+# instance and force-eject leftover Slopsmith mounts before we start.
+cleanup_leftover_dmg_mounts() {
+    # Quit any Slopsmith process running from a mounted DMG volume.
+    if pgrep -f '/Volumes/Slopsmith' &>/dev/null; then
+        echo -e "${YELLOW}Quitting Slopsmith instance(s) running from a mounted DMG...${NC}"
+        pkill -f '/Volumes/Slopsmith' 2>/dev/null || true
+        # Give the kernel a moment to release the open file handles.
+        sleep 2
+    fi
+
+    # Force-eject any leftover Slopsmith DMG mounts.
+    local mounts
+    mounts=$(mount | awk '/\/Volumes\/Slopsmith/{print $3}' || true)
+    if [[ -n "$mounts" ]]; then
+        echo -e "${YELLOW}Ejecting leftover Slopsmith DMG mount(s):${NC}"
+        while IFS= read -r m; do
+            [[ -z "$m" ]] && continue
+            hdiutil detach -force "$m" 2>/dev/null || true
+            echo "  detached: $m"
+        done <<< "$mounts"
+    fi
+}
+cleanup_leftover_dmg_mounts
+
 # Source common build logic
 source "$SCRIPT_DIR/build-common.sh"
 
 # Platform-specific: Install system dependencies
 install_system_deps() {
     if command -v brew &>/dev/null; then
-        PACKAGES=$(grep -v '^[[:space:]]*#' "$PROJECT_DIR/.packages/brew.txt" | grep -v '^[[:space:]]*$' | tr '\n' ' ')
-        if [[ -n "$PACKAGES" ]]; then
-            brew install $PACKAGES
+        # Read packages from .packages/brew.txt (strip comments and blanks)
+        local pkgs=()
+        while IFS= read -r line; do
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            pkgs+=("$line")
+        done < "$PROJECT_DIR/.packages/brew.txt"
+
+        if [[ ${#pkgs[@]} -eq 0 ]]; then
+            return
+        fi
+
+        # Check which packages are already installed by looking directly
+        # in the Cellar. This bypasses `brew list` which ALWAYS triggers
+        # a JSON API download on Homebrew 4+ (even with NO_AUTO_UPDATE),
+        # and the download hangs when formulae.brew.sh is unreachable.
+        local missing=()
+        for pkg in "${pkgs[@]}"; do
+            # Homebrew formula names use hyphens, Cellar dirs use hyphens.
+            # A few formulae (like 'pkg-config') also exist but we detect
+            # them by presence of the binary on PATH as a fallback.
+            if [[ -d "/opt/homebrew/Cellar/${pkg}" ]] \
+                || [[ -d "/usr/local/Cellar/${pkg}" ]] \
+                || command -v "${pkg}" &>/dev/null; then
+                : # already installed
+            else
+                missing+=("$pkg")
+            fi
+        done
+
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "Installing missing Homebrew packages: ${missing[*]}"
+            # brew install will trigger the JSON API download. If the
+            # default endpoint is slow, set the proxy env vars before
+            # running the build:
+            #   export ALL_PROXY=socks5://127.0.0.1:<local_port>
+            #   export HTTPS_PROXY=http://127.0.0.1:<local_port>
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install "${missing[@]}"
+        else
+            echo "All Homebrew packages already installed, skipping."
         fi
     else
         echo "Error: Homebrew not found. Install from https://brew.sh" >&2
@@ -96,6 +160,22 @@ bundle_python_impl() {
     local tarball="/tmp/cpython-${config_py}-macos-${arch}.tar.gz"
 
     mkdir -p "$PROJECT_DIR/resources/python"
+
+    # PIP_OFFLINE=1: reuse the existing Python runtime with its
+    # already-installed packages instead of re-extracting the tarball
+    # and running pip install (which would try to reach PyPI). The
+    # first build must be online to populate the runtime; subsequent
+    # offline builds skip the whole Python bundling step.
+    if [[ -n "${PIP_OFFLINE:-}" ]] && [[ -d "$runtime" ]] && [[ -f "$runtime/bin/python3" ]]; then
+        echo "  PIP_OFFLINE=1: reusing existing Python runtime (skipping extract + pip install)"
+        # Quick sanity check: can the runtime import fastapi?
+        if "$runtime/bin/python3" -c "import fastapi" 2>/dev/null; then
+            echo "  ✓ existing runtime looks healthy (fastapi importable)"
+            return 0
+        fi
+        echo "  Existing runtime missing fastapi — will do a full online bundle"
+    fi
+
     rm -rf "$runtime"
 
     if [[ ! -f "$tarball" ]] || ! shasum -a 256 "$tarball" | awk '{print $1}' | grep -qx "$pbs_sha"; then
@@ -144,9 +224,16 @@ bundle_python_impl() {
         echo "       or slopsmith cloned next to this repo." >&2
         exit 1
     fi
-    "$runtime/bin/python3" -m pip install --quiet --no-cache-dir \
+    # Use a persistent pip cache outside the runtime so repeated builds
+    # don't re-download every package. Also bump timeout/retries for
+    # slow/unreliable connections to PyPI.
+    local pip_cache="/tmp/pip-cache-slopsmith"
+    mkdir -p "$pip_cache"
+    "$runtime/bin/python3" -m pip install --quiet --cache-dir "$pip_cache" \
+        --timeout 120 --retries 5 \
         -r "$SLOPSMITH_DIR/requirements.txt" 2>&1 | tail -5
-    "$runtime/bin/python3" -m pip install --quiet --no-cache-dir \
+    "$runtime/bin/python3" -m pip install --quiet --cache-dir "$pip_cache" \
+        --timeout 120 --retries 5 \
         -r "$PROJECT_DIR/.packages/python.txt" 2>&1 | tail -5
 }
 
@@ -246,7 +333,10 @@ bundle_binaries_impl() {
 PKG="$PROJECT_DIR/package.json"
 if [[ -n "${NO_NOTARIZE:-}" ]] && grep -q '"notarize": true' "$PKG"; then
     cp "$PKG" "$PKG.bak.nota"
-    sed -i '' 's/"notarize": true/"notarize": false/' "$PKG"
+    # Portable across BSD sed (`sed -i ''`) and GNU sed (`sed -i`):
+    # avoid the `-i` extension-arg divergence by going through a temp file.
+    sed -e 's/"notarize": true/"notarize": false/' "$PKG" > "$PKG.tmp.nota" \
+        && mv "$PKG.tmp.nota" "$PKG"
     trap 'mv "$PKG.bak.nota" "$PKG" 2>/dev/null || true' EXIT
     echo "NO_NOTARIZE set — notarization disabled for this build"
 fi

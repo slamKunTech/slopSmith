@@ -39,8 +39,10 @@ esac
 echo "=== Building RsCli for $RID ==="
 echo "  Source: https://github.com/$RS2014_REPO @ $RS2014_COMMIT"
 
-TMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TMP_DIR"' EXIT
+# Use a persistent cache dir so we don't re-clone on every build.
+CACHE_DIR="$PROJECT_DIR/.cache"
+mkdir -p "$CACHE_DIR"
+TMP_DIR="$CACHE_DIR"
 
 # Resolve the clone URL. Default is direct GitHub; allow a mirror override
 # for networks with poor GitHub connectivity (e.g. behind the GFW) via
@@ -58,11 +60,29 @@ echo "  Git URL: $GIT_URL"
 # Force HTTP/1.1 to dodge "Error in the HTTP2 framing layer" failures some
 # networks hit against GitHub. Shallow-fetch the pinned commit directly —
 # far less data than a full clone and avoids pulling history.
-git init --quiet "$TMP_DIR/rs2014net"
-if ! git -C "$TMP_DIR/rs2014net" -c http.version=HTTP/1.1 fetch --depth=1 --quiet \
-        "$GIT_URL" "$RS2014_COMMIT"; then
-    echo "  Shallow fetch of pinned commit failed; falling back to full clone" >&2
-    git -c http.version=HTTP/1.1 clone --quiet "$GIT_URL" "$TMP_DIR/rs2014net"
+#
+# If the repo directory already exists and has the right commit checked out
+# (e.g. from a previous run whose temp dir wasn't cleaned up, or a failed
+# fetch that left the directory behind), skip re-cloning.
+if [[ -d "$TMP_DIR/rs2014net/.git" ]]; then
+    existing_commit=$(git -C "$TMP_DIR/rs2014net" rev-parse --short HEAD 2>/dev/null || true)
+    if [[ "$existing_commit" == "${RS2014_COMMIT:0:7}" ]]; then
+        echo "  Reusing existing clone at $RS2014_COMMIT"
+    else
+        echo "  Existing clone is at ${existing_commit:-unknown}, not $RS2014_COMMIT; re-fetching" >&2
+        rm -rf "$TMP_DIR/rs2014net"
+    fi
+fi
+
+if [[ ! -d "$TMP_DIR/rs2014net/.git" ]]; then
+    rm -rf "$TMP_DIR/rs2014net"
+    git init --quiet "$TMP_DIR/rs2014net"
+    if ! git -C "$TMP_DIR/rs2014net" -c http.version=HTTP/1.1 fetch --depth=1 --quiet \
+            "$GIT_URL" "$RS2014_COMMIT"; then
+        echo "  Shallow fetch of pinned commit failed; falling back to full clone" >&2
+        rm -rf "$TMP_DIR/rs2014net"
+        git -c http.version=HTTP/1.1 clone --quiet "$GIT_URL" "$TMP_DIR/rs2014net"
+    fi
 fi
 git -C "$TMP_DIR/rs2014net" -c advice.detachedHead=false checkout --quiet "$RS2014_COMMIT"
 

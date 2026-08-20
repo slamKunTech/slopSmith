@@ -5,6 +5,7 @@ function showScreen(id) {
     if (id === 'home') loadLibrary();
     if (id === 'favorites') loadFavorites();
     if (id === 'settings') loadSettings();
+    if (id === 'player') populatePlayerDevicePicker();
     // Free Play keeps its own canvas+rAF alive (like the player keeps
     // highway). Don't tear it down when *entering* freeplay; only stop it
     // when navigating away to something else.
@@ -23,38 +24,23 @@ function showScreen(id) {
 }
 
 // ── Library ──────────────────────────────────────────────────────────────
-let libView = 'grid';
 let currentPage = 0;
-const PAGE_SIZE = 24;
-let _treeLetter = '';
-let _treeStats = null;
+const FAV_PAGE_SIZE = 24;
+// Library view: 'list' (paginated rows, the default) or 'grid' (icon cards
+// with infinite scroll). Persisted so the choice sticks across restarts.
+let libViewMode = localStorage.getItem('libViewMode') || 'list';
+// Rows per page in list view (also the grid view's fetch batch size).
+let pageSize = parseInt(localStorage.getItem('libPageSize'), 10) || 25;
 let _debounceTimer = null;
 let _loadingMore = false;
 let _hasMore = true;
 let _gridObserver = null;
-// Bumped on filter/sort/view changes so in-flight page fetches can detect
+// Bumped on filter/sort changes so in-flight page fetches can detect
 // they've been superseded and skip rendering stale results.
 let _libEpoch = 0;
 
-function setLibView(view) {
-    libView = view;
-    document.getElementById('lib-grid').classList.toggle('hidden', view !== 'grid');
-    document.getElementById('lib-tree').classList.toggle('hidden', view !== 'tree');
-    document.querySelectorAll('.lib-grid-ctrl').forEach(el => el.classList.toggle('hidden', view !== 'grid'));
-    document.querySelectorAll('.lib-tree-ctrl').forEach(el => el.classList.toggle('hidden', view !== 'tree'));
-    document.getElementById('view-grid-btn').className = `px-3 py-2.5 text-sm transition ${view === 'grid' ? 'text-accent-light' : 'text-gray-600 hover:text-gray-400'}`;
-    document.getElementById('view-tree-btn').className = `px-3 py-2.5 text-sm transition ${view === 'tree' ? 'text-accent-light' : 'text-gray-600 hover:text-gray-400'}`;
-    if (view !== 'grid') stopInfiniteScroll();
-    _libEpoch++;
-    loadLibrary();
-}
-
 async function loadLibrary(page) {
-    if (libView === 'grid') {
-        await loadGridPage(page !== undefined ? page : currentPage);
-    } else {
-        await loadTreeView();
-    }
+    await loadLibraryPage(page !== undefined ? page : currentPage);
 }
 
 function filterLibrary() {
@@ -62,7 +48,6 @@ function filterLibrary() {
     _debounceTimer = setTimeout(() => {
         _libEpoch++;
         currentPage = 0;
-        _treeLetter = '';
         loadLibrary(0);
     }, 250);
 }
@@ -73,14 +58,14 @@ function sortLibrary() {
     loadLibrary(0);
 }
 
-// ── Grid View (server-side pagination, infinite scroll) ────────────────
+// ── Library View (list = paginated rows, grid = infinite-scroll cards) ──
 
-async function loadGridPage(page = 0) {
+async function loadLibraryPage(page = 0) {
     const myEpoch = _libEpoch;
     const q = document.getElementById('lib-filter').value.trim();
     const sort = document.getElementById('lib-sort').value;
     const format = (document.getElementById('lib-format') || {}).value || '';
-    const params = new URLSearchParams({ q, page, size: PAGE_SIZE, sort });
+    const params = new URLSearchParams({ q, page, size: pageSize, sort });
     if (format) params.set('format', format);
     const resp = await fetch(`/api/library?${params}`);
     const data = await resp.json();
@@ -90,10 +75,57 @@ async function loadGridPage(page = 0) {
     const total = data.total || 0;
     document.getElementById('lib-count').textContent = `${total} songs`;
 
-    renderGridCards(data.songs || [], 'lib-grid', page === 0 ? 'replace' : 'append');
+    updateViewControls();
+    stopInfiniteScroll();
+    const pagination = document.getElementById('lib-pagination');
+    if (libViewMode === 'grid') {
+        renderGridCards(data.songs || [], 'lib-grid', page === 0 ? 'replace' : 'append');
+        _hasMore = (page + 1) * pageSize < total;
+        setupInfiniteScroll();
+        pagination.classList.add('hidden');
+    } else {
+        renderListRows(data.songs || []);
+        renderPagination(total, page);
+        pagination.classList.remove('hidden');
+    }
+}
 
-    _hasMore = (page + 1) * PAGE_SIZE < total;
-    setupInfiniteScroll();
+function updateViewControls() {
+    const container = document.getElementById('lib-grid');
+    container.className = libViewMode === 'grid'
+        ? 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5'
+        : 'lib-list';
+    const listBtn = document.getElementById('btn-view-list');
+    const gridBtn = document.getElementById('btn-view-grid');
+    if (listBtn) listBtn.classList.toggle('view-btn-active', libViewMode === 'list');
+    if (gridBtn) gridBtn.classList.toggle('view-btn-active', libViewMode === 'grid');
+    const sizeSel = document.getElementById('lib-page-size');
+    if (sizeSel) {
+        if ([10, 25, 50, 100].includes(pageSize)) sizeSel.value = String(pageSize);
+        sizeSel.closest('span')?.classList.toggle('hidden', libViewMode !== 'list');
+    }
+}
+
+function setLibView(mode) {
+    if (mode === libViewMode) return;
+    libViewMode = mode;
+    localStorage.setItem('libViewMode', mode);
+    _libEpoch++;
+    currentPage = 0;
+    loadLibrary(0);
+}
+
+function changePageSize(v) {
+    pageSize = Math.max(1, parseInt(v, 10) || 25);
+    localStorage.setItem('libPageSize', String(pageSize));
+    _libEpoch++;
+    currentPage = 0;
+    loadLibrary(0);
+}
+
+function goLibPage(p) {
+    loadLibraryPage(Math.max(0, p));
+    document.getElementById('library-section').scrollIntoView({ behavior: 'smooth' });
 }
 
 function setupInfiniteScroll() {
@@ -109,7 +141,7 @@ function setupInfiniteScroll() {
     _gridObserver = new IntersectionObserver(async (entries) => {
         if (entries[0].isIntersecting && !_loadingMore && _hasMore) {
             _loadingMore = true;
-            try { await loadGridPage(currentPage + 1); }
+            try { await loadLibraryPage(currentPage + 1); }
             finally { _loadingMore = false; }
         }
     }, { rootMargin: '400px' });
@@ -147,7 +179,7 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
     const grid = document.getElementById(containerId);
     const html = songs.map(s => {
         const title = s.title || s.filename.replace(/_p\.psarc$/i, '').replace(/_/g, ' ');
-        const artist = s.artist || '';
+        const artist = (s.artist && s.artist !== 'Unknown') ? s.artist : '';
         const duration = s.duration ? formatTime(s.duration) : '';
         const tuning = s.tuning || '';
         const artUrl = `/api/song/${encodeURIComponent(s.filename)}/art${s.mtime ? `?v=${Math.floor(s.mtime)}` : ''}`;
@@ -207,156 +239,77 @@ function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
     }
 }
 
-// ── Tree View (server-side) ─────────────────────────────────────────────
-
-async function loadTreeView() {
-    if (!_treeStats) {
-        const resp = await fetch('/api/library/stats');
-        _treeStats = await resp.json();
-    }
-    const q = document.getElementById('lib-filter').value.trim();
-    await renderTreeInto('lib-tree', 'lib-count', _treeStats, _treeLetter, q, false);
+function renderListRows(songs) {
+    const grid = document.getElementById('lib-grid');
+    const html = songs.map(s => {
+        const title = s.title || s.filename.replace(/_p\.psarc$/i, '').replace(/_/g, ' ');
+        const artist = (s.artist && s.artist !== 'Unknown') ? s.artist : '';
+        const duration = s.duration ? formatTime(s.duration) : '';
+        const tuning = s.tuning || '';
+        const artUrl = `/api/song/${encodeURIComponent(s.filename)}/art${s.mtime ? `?v=${Math.floor(s.mtime)}` : ''}`;
+        const isSloppak = s.format === 'sloppak';
+        const stdRetune = !isSloppak && tuning && !s.has_estd &&
+            ['Eb Standard', 'D Standard', 'C# Standard', 'C Standard'].includes(tuning);
+        const dropRetune = !isSloppak && tuning && !s.has_estd &&
+            ['Drop C', 'Drop C#', 'Drop Bb', 'Drop A'].includes(tuning);
+        const retuneBtn = stdRetune
+            ? `<button data-retune="${encodeURIComponent(s.filename)}" data-title="${encodeURIComponent(title)}" data-tuning="${tuning}" data-target="E Standard"
+                class="retune-btn px-2 py-1 bg-gold/10 hover:bg-gold/20 border border-gold/20 rounded-lg text-[10px] font-medium text-gold transition whitespace-nowrap">
+                ⬆ E Standard</button>`
+            : dropRetune
+            ? `<button data-retune="${encodeURIComponent(s.filename)}" data-title="${encodeURIComponent(title)}" data-tuning="${tuning}" data-target="Drop D"
+                class="retune-btn px-2 py-1 bg-gold/10 hover:bg-gold/20 border border-gold/20 rounded-lg text-[10px] font-medium text-gold transition whitespace-nowrap">
+                ⬇ Drop D</button>`
+            : '';
+        return `<div class="lib-row group" data-play="${encodeURIComponent(s.filename)}">
+            <img class="lib-row-art" src="${artUrl}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+            <span class="lib-row-placeholder" style="display:none">🎸</span>
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 min-w-0">
+                    <h3 class="text-sm font-semibold text-white truncate group-hover:text-accent-light transition">${esc(title)}</h3>
+                    ${formatBadgeInline(s.format, s.stem_count)}
+                </div>
+                <div class="flex items-center flex-wrap gap-1.5 mt-1 text-xs">
+                    ${artist ? `<span class="text-gray-500">${esc(artist)}</span>` : ''}
+                    ${(s.arrangements || []).map(a =>
+                        `<span class="px-1.5 py-0.5 rounded ${
+                            a.name === 'Lead' ? 'bg-red-900/40 text-red-300' :
+                            a.name === 'Rhythm' ? 'bg-blue-900/40 text-blue-300' :
+                            a.name === 'Bass' ? 'bg-green-900/40 text-green-300' :
+                            'bg-dark-600 text-gray-400'
+                        }">${a.name}</span>`
+                    ).join('')}
+                    ${tuning ? `<span class="px-1.5 py-0.5 rounded ${tuning === 'E Standard' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}">${tuning}</span>` : ''}
+                    ${s.has_lyrics ? `<span class="px-1.5 py-0.5 bg-purple-900/30 rounded text-purple-300">Lyrics</span>` : ''}
+                    ${duration ? `<span class="text-gray-600">${duration}</span>` : ''}
+                </div>
+            </div>
+            ${retuneBtn}
+            <div class="flex items-center gap-1 flex-shrink-0">
+                ${editBtn(s)}
+                ${heartBtn(s.filename, s.favorite)}
+            </div>
+        </div>`;
+    }).join('');
+    grid.innerHTML = html;
 }
 
-let _treePage = 0;
-const TREE_PAGE_SIZE = 50;
-
-async function renderTreeInto(containerId, countId, stats, letter, q, favoritesOnly, page) {
-    if (page === undefined) page = favoritesOnly ? _favTreePage || 0 : _treePage;
-    const container = document.getElementById(containerId);
-    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ#'.split('');
-    const chevron = `<svg class="chevron w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>`;
-
-    const letterFn = favoritesOnly ? 'filterFavTreeLetter' : 'filterTreeLetter';
-    const pageFn = favoritesOnly ? 'goFavTreePage' : 'goTreePage';
-    let html = '<div class="flex flex-wrap gap-1 mb-6">';
-    html += `<button onclick="${letterFn}('')" class="px-2 py-1 rounded text-xs transition ${
-        !letter ? 'bg-accent text-white' : 'bg-dark-700 text-gray-400 hover:text-white'
-    }">All</button>`;
-    for (const l of letters) {
-        const count = stats.letters[l] || 0;
-        const active = letter === l;
-        html += `<button onclick="${letterFn}('${l}')" class="px-2 py-1 rounded text-xs transition ${
-            active ? 'bg-accent text-white' :
-            count ? 'bg-dark-700 text-gray-300 hover:text-white' :
-            'bg-dark-700/50 text-gray-700 cursor-default'
-        }" ${count ? '' : 'disabled'}>${l}</button>`;
+function renderPagination(total, page) {
+    const pag = document.getElementById('lib-pagination');
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const start = Math.max(0, page - 2);
+    const end = Math.min(totalPages, start + 5);
+    let html = `<div class="flex items-center justify-center gap-2 py-6 flex-wrap">`;
+    html += `<span class="text-xs text-gray-500 mr-1">第 ${page + 1} / ${totalPages} 页 · ${total} 首</span>`;
+    html += `<button onclick="goLibPage(0)" class="px-3 py-1.5 rounded-lg text-xs ${page === 0 ? 'text-gray-600 cursor-default' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}" ${page === 0 ? 'disabled' : ''}>«</button>`;
+    html += `<button onclick="goLibPage(${page - 1})" class="px-3 py-1.5 rounded-lg text-xs ${page === 0 ? 'text-gray-600 cursor-default' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}" ${page === 0 ? 'disabled' : ''}>‹</button>`;
+    for (let i = start; i < end; i++) {
+        html += `<button onclick="goLibPage(${i})" class="px-3 py-1.5 rounded-lg text-xs ${i === page ? 'bg-accent text-white' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}">${i + 1}</button>`;
     }
-    html += '</div>';
-
-    // Fetch artists for the selected letter/all
-    const params = new URLSearchParams();
-    if (letter) params.set('letter', letter);
-    if (q) params.set('q', q);
-    if (favoritesOnly) params.set('favorites', '1');
-    const format = (document.getElementById('lib-format') || {}).value || '';
-    if (format) params.set('format', format);
-    params.set('page', page);
-    params.set('size', TREE_PAGE_SIZE);
-    const resp = await fetch(`/api/library/artists?${params}`);
-    const data = await resp.json();
-    const artists = data.artists || [];
-    const totalArtists = data.total_artists || 0;
-    const totalPages = Math.ceil(totalArtists / TREE_PAGE_SIZE);
-
-    let songCount = 0, artistCount = artists.length;
-    for (const a of artists) songCount += a.song_count;
-    const pageInfo = totalPages > 1 ? ` · Page ${page + 1} of ${totalPages}` : '';
-    document.getElementById(countId).textContent =
-        `${totalArtists} artists (${songCount} songs on this page)${pageInfo}`;
-
-    for (const artist of artists) {
-        const openClass = q || artists.length <= 5 ? ' open' : '';
-        html += `<div class="artist-row${openClass}">`;
-        html += `<div class="artist-header" onclick="this.parentElement.classList.toggle('open')">`;
-        html += chevron;
-        html += `<span class="text-white font-semibold text-sm flex-1">${esc(artist.name)}</span>`;
-        html += `<span class="text-xs text-gray-600">${artist.song_count} song${artist.song_count !== 1 ? 's' : ''} · ${artist.album_count} album${artist.album_count !== 1 ? 's' : ''}</span>`;
-        html += `</div><div class="artist-body">`;
-
-        for (const album of artist.albums) {
-            const artUrl = `/api/song/${encodeURIComponent(album.songs[0].filename)}/art${album.songs[0].mtime ? `?v=${Math.floor(album.songs[0].mtime)}` : ''}`;
-            const albumOpen = q || artist.albums.length === 1 ? ' open' : '';
-            html += `<div class="album-group${albumOpen}">`;
-            html += `<div class="album-header" onclick="this.parentElement.classList.toggle('open')">`;
-            html += chevron;
-            html += `<img src="${artUrl}" alt="" class="album-art-sm" loading="lazy" onerror="this.style.display='none'">`;
-            html += `<span class="text-gray-300 text-sm flex-1">${esc(album.name)}</span>`;
-            html += `<span class="text-xs text-gray-600">${album.songs.length}</span>`;
-            html += `</div><div class="album-body">`;
-
-            for (const s of album.songs) {
-                const title = s.title || s.filename;
-                const duration = s.duration ? formatTime(s.duration) : '';
-                const tuning = s.tuning || '';
-                const isSloppak = s.format === 'sloppak';
-                const stdRetune = !isSloppak && tuning && !s.has_estd &&
-                    ['Eb Standard', 'D Standard', 'C# Standard', 'C Standard'].includes(tuning);
-                const dropRetune = !isSloppak && tuning && !s.has_estd &&
-                    ['Drop C', 'Drop C#', 'Drop Bb', 'Drop A'].includes(tuning);
-                const canRetune = stdRetune || dropRetune;
-                const retuneTarget = stdRetune ? 'E Standard' : 'Drop D';
-                html += `<div class="song-row" data-play="${encodeURIComponent(s.filename)}">`;
-                html += `<div class="flex-1 min-w-0 flex items-center gap-2"><span class="text-sm text-white truncate block">${esc(title)}</span>${formatBadgeInline(s.format, s.stem_count)}</div>`;
-                html += `<div class="flex items-center gap-1.5 flex-shrink-0 text-xs">`;
-                for (const a of (s.arrangements || [])) {
-                    const cls = a.name === 'Lead' ? 'bg-red-900/40 text-red-300' :
-                                a.name === 'Rhythm' ? 'bg-blue-900/40 text-blue-300' :
-                                a.name === 'Bass' ? 'bg-green-900/40 text-green-300' :
-                                'bg-dark-600 text-gray-400';
-                    html += `<span class="px-1.5 py-0.5 rounded ${cls}">${a.name}</span>`;
-                }
-                if (tuning)
-                    html += `<span class="px-1.5 py-0.5 rounded ${tuning === 'E Standard' ? 'bg-green-900/30 text-green-400' : 'bg-yellow-900/30 text-yellow-400'}">${tuning}</span>`;
-                if (s.has_lyrics)
-                    html += `<span class="px-1.5 py-0.5 bg-purple-900/30 rounded text-purple-300">Lyrics</span>`;
-                if (duration)
-                    html += `<span class="text-gray-600 w-10 text-right">${duration}</span>`;
-                if (canRetune)
-                    html += `<button data-retune="${encodeURIComponent(s.filename)}" data-title="${encodeURIComponent(title)}" data-tuning="${tuning}" data-target="${retuneTarget}"
-                        class="retune-btn px-1.5 py-0.5 bg-gold/10 hover:bg-gold/20 border border-gold/20 rounded text-gold" title="Convert to ${retuneTarget}">${dropRetune ? 'D' : 'E'}</button>`;
-                html += editBtn(s);
-                html += heartBtn(s.filename, s.favorite);
-                html += `</div></div>`;
-            }
-            html += `</div></div>`;
-        }
-        html += `</div></div>`;
-    }
-
-    // Pagination
-    if (totalPages > 1) {
-        html += '<div class="flex items-center justify-center gap-2 py-6">';
-        html += `<button onclick="${pageFn}(0)" class="px-3 py-1.5 rounded-lg text-xs ${page === 0 ? 'text-gray-600' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}" ${page === 0 ? 'disabled' : ''}>« First</button>`;
-        html += `<button onclick="${pageFn}(${page - 1})" class="px-3 py-1.5 rounded-lg text-xs ${page === 0 ? 'text-gray-600' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}" ${page === 0 ? 'disabled' : ''}>‹ Prev</button>`;
-        const start = Math.max(0, page - 2);
-        const end = Math.min(totalPages, start + 5);
-        for (let i = start; i < end; i++) {
-            html += `<button onclick="${pageFn}(${i})" class="px-3 py-1.5 rounded-lg text-xs ${i === page ? 'bg-accent text-white' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}">${i + 1}</button>`;
-        }
-        html += `<button onclick="${pageFn}(${page + 1})" class="px-3 py-1.5 rounded-lg text-xs ${page >= totalPages - 1 ? 'text-gray-600' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}" ${page >= totalPages - 1 ? 'disabled' : ''}>Next ›</button>`;
-        html += `<button onclick="${pageFn}(${totalPages - 1})" class="px-3 py-1.5 rounded-lg text-xs ${page >= totalPages - 1 ? 'text-gray-600' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}" ${page >= totalPages - 1 ? 'disabled' : ''}>Last »</button>`;
-        html += '</div>';
-    }
-
-    container.innerHTML = html;
-}
-
-function goTreePage(p) {
-    _treePage = Math.max(0, p);
-    loadTreeView();
-    document.getElementById('library-section').scrollIntoView({ behavior: 'smooth' });
-}
-
-function filterTreeLetter(letter) {
-    _treeLetter = (_treeLetter === letter) ? '' : letter;
-    _treePage = 0;
-    loadTreeView();
-}
-
-function toggleAllArtists(expand) {
-    document.querySelectorAll('.artist-row').forEach(el => el.classList.toggle('open', expand));
-    document.querySelectorAll('.album-group').forEach(el => el.classList.toggle('open', expand));
+    html += `<button onclick="goLibPage(${page + 1})" class="px-3 py-1.5 rounded-lg text-xs ${page >= totalPages - 1 ? 'text-gray-600 cursor-default' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}" ${page >= totalPages - 1 ? 'disabled' : ''}>›</button>`;
+    html += `<button onclick="goLibPage(${totalPages - 1})" class="px-3 py-1.5 rounded-lg text-xs ${page >= totalPages - 1 ? 'text-gray-600 cursor-default' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}" ${page >= totalPages - 1 ? 'disabled' : ''}>»</button>`;
+    html += `</div>`;
+    pag.innerHTML = html;
 }
 
 function esc(s) {
@@ -365,12 +318,26 @@ function esc(s) {
     return d.innerHTML;
 }
 
+// ── Player input device (mirror of Free Play's Input dropdown) ─────────
+// Both pickers share freeplay's device logic: same device list, same
+// preselect rule, and switching one updates the mic stream + both selects.
+function populatePlayerDevicePicker() {
+    const sel = document.getElementById('player-device');
+    if (sel && window.freeplay && typeof window.freeplay.populateDevicePicker === 'function') {
+        window.freeplay.populateDevicePicker(sel);
+    }
+}
+
+function changePlayerDevice(v) {
+    if (window.freeplay && typeof window.freeplay.switchDevice === 'function') {
+        window.freeplay.switchDevice(v);
+    }
+    const fpSel = document.getElementById('fp-device');
+    if (fpSel && fpSel.value !== v) fpSel.value = v;
+}
+
 // ── Favorites ────────────────────────────────────────────────────────────
-let favView = 'grid';
 let favPage = 0;
-let _favTreeLetter = '';
-let _favTreePage = 0;
-let _favTreeStats = null;
 let _favDebounce = null;
 
 function heartBtn(filename, isFav) {
@@ -395,27 +362,13 @@ async function toggleFavorite(filename) {
     return data.favorite;
 }
 
-function setFavView(view) {
-    favView = view;
-    document.getElementById('fav-grid').classList.toggle('hidden', view !== 'grid');
-    document.getElementById('fav-tree').classList.toggle('hidden', view !== 'tree');
-    document.querySelectorAll('.fav-grid-ctrl').forEach(el => el.classList.toggle('hidden', view !== 'grid'));
-    document.querySelectorAll('.fav-tree-ctrl').forEach(el => el.classList.toggle('hidden', view !== 'tree'));
-    document.getElementById('fav-view-grid-btn').className = `px-3 py-2.5 text-sm transition ${view === 'grid' ? 'text-accent-light' : 'text-gray-600 hover:text-gray-400'}`;
-    document.getElementById('fav-view-tree-btn').className = `px-3 py-2.5 text-sm transition ${view === 'tree' ? 'text-accent-light' : 'text-gray-600 hover:text-gray-400'}`;
-    const pag = document.getElementById('fav-pagination');
-    if (pag && view !== 'grid') pag.innerHTML = '';
-    loadFavorites();
-}
-
 async function loadFavorites() {
-    if (favView === 'grid') await loadFavGridPage(favPage);
-    else await loadFavTreeView();
+    await loadFavGridPage(favPage);
 }
 
 function filterFavorites() {
     clearTimeout(_favDebounce);
-    _favDebounce = setTimeout(() => { favPage = 0; _favTreeLetter = ''; loadFavorites(); }, 250);
+    _favDebounce = setTimeout(() => { favPage = 0; loadFavorites(); }, 250);
 }
 
 function sortFavorites() { favPage = 0; loadFavorites(); }
@@ -424,10 +377,10 @@ async function loadFavGridPage(page = 0) {
     const q = document.getElementById('fav-filter').value.trim();
     const sort = document.getElementById('fav-sort').value;
     favPage = page;
-    const params = new URLSearchParams({ q, page, size: PAGE_SIZE, sort, favorites: 1 });
+    const params = new URLSearchParams({ q, page, size: FAV_PAGE_SIZE, sort, favorites: 1 });
     const resp = await fetch(`/api/library?${params}`);
     const data = await resp.json();
-    const totalPages = Math.ceil((data.total || 0) / PAGE_SIZE);
+    const totalPages = Math.ceil((data.total || 0) / FAV_PAGE_SIZE);
     document.getElementById('fav-count').textContent =
         `${data.total || 0} favorites · Page ${favPage + 1} of ${Math.max(1, totalPages)}`;
     renderGridCards(data.songs || [], 'fav-grid');
@@ -458,37 +411,32 @@ function renderFavPagination(totalPages) {
 
 function goFavPage(p) { loadFavGridPage(Math.max(0, p)); }
 
-async function loadFavTreeView() {
-    if (!_favTreeStats) {
-        const resp = await fetch('/api/library/stats?favorites=1');
-        _favTreeStats = await resp.json();
-    }
-    const q = document.getElementById('fav-filter').value.trim();
-    const letter = _favTreeLetter;
-    // Reuse the tree renderer with fav-tree container and fav-count
-    await renderTreeInto('fav-tree', 'fav-count', _favTreeStats, letter, q, true);
-}
-
-function filterFavTreeLetter(letter) {
-    _favTreeLetter = (_favTreeLetter === letter) ? '' : letter;
-    _favTreePage = 0;
-    loadFavTreeView();
-}
-
-function goFavTreePage(p) {
-    _favTreePage = Math.max(0, p);
-    loadFavTreeView();
-}
-
 // ── Settings ─────────────────────────────────────────────────────────────
 async function loadSettings() {
     const resp = await fetch('/api/settings');
     const data = await resp.json();
     document.getElementById('dlc-path').value = data.dlc_dir || '';
+    const dlcDirsEl = document.getElementById('dlc-dirs');
+    if (dlcDirsEl) dlcDirsEl.value = (data.dlc_dirs || []).join('\n');
     document.getElementById('default-arrangement').value = data.default_arrangement || '';
     document.getElementById('demucs-server-url').value = data.demucs_server_url || '';
     const leftyEl = document.getElementById('setting-lefty');
     if (leftyEl) leftyEl.checked = highway.getLefty();
+    // Mirror / tilt buttons reflect their persisted state on load —
+    // highway.js restores _inverted/_tilted from localStorage at init,
+    // so highlight the buttons to match without waiting for a click.
+    const invBtn = document.getElementById('btn-inverted');
+    if (invBtn) {
+        const on = highway.getInverted();
+        invBtn.classList.toggle('bg-blue-600/80', on);
+        invBtn.classList.toggle('bg-blue-900/40', !on);
+    }
+    const tiltBtn = document.getElementById('btn-tilted');
+    if (tiltBtn) {
+        const on = highway.getTilted();
+        tiltBtn.classList.toggle('bg-orange-600/80', on);
+        tiltBtn.classList.toggle('bg-orange-900/40', !on);
+    }
     // Restore master-difficulty slider from persisted value (defaults
     // to 100 when the key is absent — no behaviour change for users
     // who've never touched the slider).
@@ -577,6 +525,8 @@ async function saveSettings() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             dlc_dir: document.getElementById('dlc-path').value.trim(),
+            dlc_dirs: (document.getElementById('dlc-dirs')?.value || '')
+                .split('\n').map(s => s.trim()).filter(Boolean),
             default_arrangement: document.getElementById('default-arrangement').value,
             demucs_server_url: document.getElementById('demucs-server-url').value.trim(),
             av_offset_ms: _avOffsetMs,
@@ -607,7 +557,6 @@ async function rescanLibrary() {
             btn.disabled = false;
             btn.textContent = 'Rescan Library';
             status.textContent = sd.error ? `Error: ${sd.error}` : 'Done!';
-            _treeStats = null;
             loadLibrary();
         }
     }, 1000);
@@ -634,7 +583,6 @@ async function fullRescanLibrary() {
             btn.disabled = false;
             btn.textContent = 'Full Rescan';
             status.textContent = sd.error ? `Error: ${sd.error}` : 'Done!';
-            _treeStats = null;
             loadLibrary();
         }
     }, 1000);
@@ -910,6 +858,33 @@ function setVolume(v) {
     document.getElementById('vol-label').textContent = v + '%';
     localStorage.setItem('volume', String(v));
 }
+
+function toggleInverted() {
+    const newState = !highway.getInverted();
+    highway.setInverted(newState);
+    const btn = document.getElementById('btn-inverted');
+    if (newState) {
+        btn.classList.remove('bg-blue-900/40');
+        btn.classList.add('bg-blue-600/80');
+    } else {
+        btn.classList.remove('bg-blue-600/80');
+        btn.classList.add('bg-blue-900/40');
+    }
+}
+
+function toggleTilted() {
+    const newState = !highway.getTilted();
+    highway.setTilted(newState);
+    const btn = document.getElementById('btn-tilted');
+    if (newState) {
+        btn.classList.remove('bg-orange-900/40');
+        btn.classList.add('bg-orange-600/80');
+    } else {
+        btn.classList.remove('bg-orange-600/80');
+        btn.classList.add('bg-orange-900/40');
+    }
+}
+
 function setSpeed(v) {
     audio.playbackRate = parseFloat(v);
     document.getElementById('speed-label').textContent = parseFloat(v).toFixed(2) + 'x';
@@ -1635,7 +1610,6 @@ async function pollScanStatus() {
         } else {
             if (document.getElementById('scan-banner')) {
                 hideScanBanner();
-                _treeStats = null;  // Refresh stats
                 loadLibrary();
             }
             clearInterval(_scanPollId);
@@ -1816,7 +1790,7 @@ async function loadPlugins() {
 // before any playSong runs — otherwise a fast click could start
 // playback with stale settings before /api/settings returned.
 loadPlugins().then(async (plugins) => {
-    setLibView('grid');
+    loadLibrary();
     try { await loadSettings(); } catch (e) { console.warn('initial loadSettings failed:', e); }
     checkScanAndLoad();
     // Viz picker depends on plugin scripts having loaded (to find

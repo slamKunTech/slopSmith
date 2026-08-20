@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from song import (
+from lib.song import (
     Song,
     Beat,
     Section,
@@ -62,11 +62,15 @@ def _safe_id(filename: str) -> str:
 
 
 def resolve_source_dir(
+    path: Path,
     filename: str,
-    dlc_root: Path,
     unpack_cache_root: Path,
 ) -> Path:
     """Return the on-disk directory containing a sloppak's files.
+
+    ``path`` is the already-resolved sloppak location (file or dir);
+    ``filename`` is the library DB key, used only as the cache identity
+    (callers across multiple DLC roots pass the namespaced key).
 
     - Directory-form: returns the sloppak dir itself (no copy).
     - Zip-form:       unpacks to ``unpack_cache_root/{id}/`` on first use,
@@ -74,7 +78,6 @@ def resolve_source_dir(
 
     Caches the resolution so subsequent calls are ~free.
     """
-    path = dlc_root / filename
     stat = path.stat()
     mtime, size = stat.st_mtime, stat.st_size
 
@@ -155,13 +158,16 @@ class LoadedSloppak:
 
 
 def load_song(
+    path: Path,
     filename: str,
-    dlc_root: Path,
     unpack_cache_root: Path,
 ) -> LoadedSloppak:
     """Fully load a sloppak: resolve its source dir, parse manifest + all
-    arrangements + optional lyrics, and return a ready-to-stream Song."""
-    source_dir = resolve_source_dir(filename, dlc_root, unpack_cache_root)
+    arrangements + optional lyrics, and return a ready-to-stream Song.
+
+    ``path`` is the already-resolved sloppak location (file or dir);
+    ``filename`` is the library DB key, used only as the cache identity."""
+    source_dir = resolve_source_dir(path, filename, unpack_cache_root)
     manifest = _read_manifest(source_dir)
 
     song = Song(

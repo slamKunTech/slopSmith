@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/mac/.claude/**)",
+      "Bash(curl *)",
+      "Bash(ping *)",
+      "Read(//Users/mac/**)",
+      "Bash(find *)",
+      "Bash(npm install *)",
+      "Bash(rm *)",
+      "Bash(claude *)"
+    ]
+  },
+  "$version": 4
+}

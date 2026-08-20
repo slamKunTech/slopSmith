@@ -62,6 +62,8 @@
     const CONFIDENCE_GATE = 0.5;        // fallback monophonic confidence floor
     const POLL_INTERVAL_MS = 33;
     const MIN_NOTE_SUS = 0.08;
+    const MISS_GRACE_FRAMES = 3;        // frames (×~33ms) a note may vanish before closing — kills flicker/shattered blocks
+    const ONSET_FRAMES = 2;             // consecutive detections before a note starts — rejects attack-transient ghosts
     const SILENCE_OVERLAY_MS = 2000;
 
     // Polyphonic detection params
@@ -70,21 +72,28 @@
     const FUND_WEIGHT = 1.0;
     const HARM_WEIGHT = 0.5;
     const ABS_FLOOR_DB = -85;           // below this a bin is treated as silence
-    const REL_GATE = 0.12;             // a fundamental must be ≥12% of this frame's peak
+    const REL_GATE = 0.12;              // a fundamental must be ≥12% of this frame's peak (low E needs headroom)
+    const SNR_MIN_DB = 15;              // candidate bin must clear the adaptive noise floor by this much
+    const MIN_PEAK_DB = -70;            // frame peak must clear this for ANY detection — kills ghost notes on a silent/muted input
 
     // ── State ────────────────────────────────────────────────────────────
     let canvas = null, ctx = null, rafId = null, running = false;
     let lastPollAt = 0, pollInFlight = false;
     let lastHeardAt = 0;
     let audioAvailable = false;        // JUCE engine present (fallback path)
+    let mirrored = false;              // mirror strings: 123456 ↔ 654321
+    let tilted = false;                // tilt highway 45 degrees right (clockwise)
 
     // Web Audio graph
     let audioCtx = null, analyser = null, freqData = null, micStream = null;
     let webAudioOk = false, sampleRate = 48000;
+    let lastDiagAt = 0;
+    let lastPeakDb = -Infinity;
 
     // Note pipeline (shared by polyphonic + fallback)
     let notes = [];                    // closed notes: {t, s, f, sus}  (t = abs seconds)
     let activeNotes = new Map();       // key "s:f" -> {t, s, f, midi}  (currently ringing)
+    let pending = new Map();           // key "s:f" -> {s, f, midi, seen} (onset debounce)
 
     // Recording / playback
     let recording = false, recStart = 0;
@@ -100,6 +109,7 @@
     let elNote, elFreq, elPos, elOverlay, elOverlayTitle, elOverlayBody;
     let elTuning, elCapo, elDevice, elRec, elPlay, elLoopBtn, elClear, elRecTime;
     let elExpMidi, elExpAudio;
+    let elRootNote, elRootFreq, elMirrorBtn, elTiltBtn;
 
     function $(id) { return document.getElementById(id); }
 
@@ -150,7 +160,9 @@
         return { y, halfW, scale, nearY, farY, nearHalf, farHalf, W, H };
     }
     function laneX(s, pr) {
-        const off = (s - (STRING_COUNT - 1) / 2) / ((STRING_COUNT - 1) / 2);
+        // Apply mirroring: if mirrored, reverse string order
+        const effectiveS = mirrored ? (STRING_COUNT - 1 - s) : s;
+        const off = (effectiveS - (STRING_COUNT - 1) / 2) / ((STRING_COUNT - 1) / 2);
         return pr.W / 2 + off * pr.halfW;
     }
 
@@ -159,6 +171,15 @@
         const W = canvas.width, H = canvas.height;
         const top = project(1), bot = project(0);
         const cx = W / 2;
+
+        // Apply tilt transform if enabled
+        if (tilted) {
+            ctx.save();
+            ctx.translate(W / 2, H / 2);
+            ctx.rotate(Math.PI / 4); // 45 degrees clockwise (right)
+            ctx.translate(-W / 2, -H / 2);
+        }
+
         ctx.fillStyle = '#0a0a14';
         ctx.beginPath();
         ctx.moveTo(cx - top.halfW, top.y); ctx.lineTo(cx + top.halfW, top.y);
@@ -175,6 +196,10 @@
         ctx.beginPath();
         ctx.moveTo(cx - bot.halfW, bot.nearY); ctx.lineTo(cx + bot.halfW, bot.nearY);
         ctx.stroke();
+
+        if (tilted) {
+            ctx.restore();
+        }
     }
 
     function drawNote(note, clock, alpha) {
@@ -188,6 +213,13 @@
         const xBot = laneX(note.s, pBot);
         const xTop = laneX(note.s, pTop);
         const wBot = 18 * pBot.scale, wTop = 18 * pTop.scale;
+
+        if (tilted) {
+            ctx.save();
+            ctx.translate(canvas.width / 2, canvas.height / 2);
+            ctx.rotate(Math.PI / 4); // 45 degrees clockwise (right)
+            ctx.translate(-canvas.width / 2, -canvas.height / 2);
+        }
 
         ctx.globalAlpha = alpha == null ? 1 : alpha;
         ctx.fillStyle = STRING_COLORS[note.s];
@@ -203,6 +235,10 @@
             ctx.font = `${Math.max(9, Math.round(11 * pBot.scale))}px ui-sans-serif, system-ui`;
             ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
             ctx.fillText(String(note.f), xBot, pBot.y);
+        }
+
+        if (tilted) {
+            ctx.restore();
         }
     }
 
@@ -230,10 +266,57 @@
         if (!analyser || !freqData) return [];
         analyser.getFloatFrequencyData(freqData);
         const binHz = sampleRate / FFT_SIZE;
+        // Adaptive noise gate: the frame's median bin level estimates the
+        // broadband noise floor (hiss, hum, fan noise). A real plucked
+        // note's fundamental sticks far above it; idle noise is roughly
+        // uniform, so nothing clears the gate — no ghost notes while the
+        // guitar is silent. Median is robust against the few strong bins
+        // a real note excites, so the estimate stays valid while playing.
+        const finite = [];
+        let framePeakDb = -Infinity;
+        for (let i = 0; i < freqData.length; i++) {
+            if (!isFinite(freqData[i])) continue;
+            finite.push(freqData[i]);
+            if (freqData[i] > framePeakDb) framePeakDb = freqData[i];
+        }
+        lastPeakDb = framePeakDb;
+        let noiseDb;
+        if (finite.length >= 16) {
+            finite.sort((a, b) => a - b);
+            noiseDb = finite[finite.length >> 1];
+        } else {
+            noiseDb = ABS_FLOOR_DB; // near-total silence: fall back to absolute floor
+        }
+        // Throttled spectrum diagnostic for the low string: one line per
+        // second with the dB levels of the low E fundamental + first
+        // harmonics. Pluck 6弦 once and paste the last few lines.
+        {
+            const t = performance.now();
+            if (t - lastDiagAt > 1000) {
+                lastDiagAt = t;
+                const f0 = 440 * Math.pow(2, (openMidi(0) - 69) / 12);
+                const dbAt = (hz) => {
+                    const b = Math.round(hz / binHz);
+                    return (b >= 0 && b < freqData.length && isFinite(freqData[b]))
+                        ? freqData[b].toFixed(1) + 'dB' : 'sil';
+                };
+                const devLabel = micStream && micStream.getAudioTracks().length
+                    ? micStream.getAudioTracks()[0].label : 'none';
+                console.log(`=== 6弦频谱 === dev=${devLabel} peak=${framePeakDb.toFixed(1)}dB noise=${noiseDb.toFixed(1)}dB gate=${(noiseDb + SNR_MIN_DB).toFixed(1)}dB`
+                    + ` | E2=${dbAt(f0)} 2nd=${dbAt(f0 * 2)} 3rd=${dbAt(f0 * 3)} 4th=${dbAt(f0 * 4)} 5th=${dbAt(f0 * 5)}`);
+            }
+        }
+        // A real pluck peaks tens of dB above converter hiss. If the
+        // whole frame sits below MIN_PEAK_DB the input is silent
+        // (wrong/muted device, unplugged cable) — bail out instead of
+        // letting the degenerate relative gate turn numeric noise into
+        // ghost notes on random strings.
+        if (framePeakDb < MIN_PEAK_DB) return [];
         const linAt = (bin) => {
             if (bin < 0 || bin >= freqData.length) return 0;
             const db = freqData[bin];
             if (!isFinite(db) || db <= ABS_FLOOR_DB) return 0;
+            if (db <= noiseDb + SNR_MIN_DB) return 0;
             return Math.pow(10, db / 20);
         };
 
@@ -249,9 +332,29 @@
                 const fundBin = Math.round(f0 / binHz);
                 const fund = linAt(fundBin);
                 if (fund <= 0) continue;
+                // Harmonic score: weight fundamental heavily, harmonics lightly.
+                // Keep per-harmonic bin levels — the ghost suppressor later
+                // predicts a ghost's expected energy from the note's own
+                // harmonic series instead of guessing from its score.
                 let score = FUND_WEIGHT * fund;
-                for (let h = 2; h <= HARMONICS; h++) score += HARM_WEIGHT * linAt(Math.round((f0 * h) / binHz));
-                scored.push({ s, f, midi, score, fund });
+                const harms = [fund];
+                for (let h = 2; h <= HARMONICS; h++) {
+                    const amp = linAt(Math.round((f0 * h) / binHz));
+                    harms.push(amp);
+                    score += HARM_WEIGHT * amp;
+                }
+                // Fundamental-presence gate: a real plucked string's
+                // fundamental decays faster than its harmonics, so
+                // demanding dominance (0.5) rejects nearly every real
+                // note — 1弦 notes die mid-sustain and the weak low-E
+                // fundamental is skipped outright. The noise gate already
+                // rejects candidates with NO fundamental energy, so this
+                // only needs to catch near-absent leakage — 0.05.
+                // (A weak fundamental still carries real pitch info and
+                // the harmonic sum does the heavy lifting.)
+                const fundRatio = (FUND_WEIGHT * fund) / score;
+                if (fundRatio < 0.05) continue;
+                scored.push({ s, f, midi, score, fund, harms });
                 if (fund > peakFund) peakFund = fund;
             }
         }
@@ -270,40 +373,151 @@
         for (const c of scored) { (byString[c.s] = byString[c.s] || []).push(c); }
         for (let s = 0; s < STRING_COUNT; s++) {
             const arr = byString[s] || [];
-            let best = null;
-            for (let i = 0; i < arr.length; i++) {
-                const c = arr[i];
+            if (!arr.length) continue;
+            let bestScore = 0;
+            for (const c of arr) {
                 if (c.fund < gate) continue;
-                const prev = arr[i - 1], next = arr[i + 1];
-                const localMax = (!prev || c.score >= prev.score) && (!next || c.score >= next.score);
-                if (!localMax) continue;
-                if (!best || c.score > best.score) best = c;
+                if (c.score > bestScore) bestScore = c.score;
             }
-            perString[s] = best;
+            if (bestScore <= 0) continue;
+            // Walk ascending fret. The first gated candidate within a
+            // factor of 4 of the string's best score wins — that's the
+            // played note. Later candidates whose fundamental sits at an
+            // integer multiple of it are its harmonics (low E's octave at
+            // fret 12 is often LOUDER than the fundamental) and are
+            // skipped so they can't steal the string. The window is
+            // generous because preamped guitars (e.g. Enya Nova Go) roll
+            // off the low-string fundamental hard.
+            let pick = null;
+            for (const c of arr) {
+                if (c.fund < gate) continue;
+                if (pick) {
+                    const r = Math.pow(2, (c.midi - pick.midi) / 12);
+                    const n = Math.round(r);
+                    if (r > 1.05 && r < 16.1 && Math.abs(r - n) < 0.03) continue; // harmonic of pick
+                }
+                if (c.score >= bestScore * 0.25) { pick = c; break; }
+            }
+            perString[s] = pick;
         }
 
         // Cross-string dedup + harmonic-ghost suppression.
         let winners = perString.filter(Boolean);
-        // Suppress overtone ghosts: a winner whose fundamental sits on an
-        // integer-multiple harmonic of a louder winner, AND is much weaker
-        // than it, is almost certainly an overtone rather than a second note.
-        // The much-weaker guard (≤50%) keeps real octaves — which usually
-        // have comparable fundamental energy — from being dropped.
-        winners.sort((a, b) => b.score - a.score);
-        const kept = [];
-        for (const c of winners) {
-            const f0 = 440 * Math.pow(2, (c.midi - 69) / 12);
-            let ghost = false;
-            for (const k of kept) {
-                const kf0 = 440 * Math.pow(2, (k.midi - 69) / 12);
-                const ratio = f0 / kf0;
-                if (ratio > 1.9 && ratio < 6.1) {
-                    const n = Math.round(ratio);
-                    if (Math.abs(ratio - n) < 0.03 && c.fund < k.fund * 0.5) { ghost = true; break; }
+
+        // If only one winner detected, return it immediately (common case: single string plucked)
+        if (winners.length === 1) {
+            return [{ s: winners[0].s, f: winners[0].f, midi: winners[0].midi }];
+        }
+
+        // DEBUG: Log what each string detected before filtering
+        if (winners.length > 0) {
+            console.log(`=== Raw detection === (noiseFloor=${noiseDb.toFixed(1)}dB)`);
+            winners.forEach(w => {
+                const note = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][w.midi % 12];
+                const octave = Math.floor(w.midi / 12) - 1;
+                console.log(`String ${w.s+1}: fret ${w.f}, ${note}${octave} (MIDI ${w.midi}), fund=${w.fund.toFixed(2)}, score=${w.score.toFixed(2)}`);
+            });
+        }
+
+        // AGGRESSIVE SINGLE-NOTE STRATEGY for resonant low strings
+        // Guitar playing is 99% monophonic. Only keep multiple notes if they are
+        // genuinely a chord (similar attack energy). Otherwise, pick the strongest.
+
+        // Find the absolute strongest candidate by total score
+        let strongest = winners[0];
+        for (const w of winners) {
+            if (w.score > strongest.score) {
+                strongest = w;
+            }
+        }
+
+        // PHYSICAL STRING PREFERENCE: when resonance is strong, prefer the string
+        // that is physically expected to produce this pitch (lower string for lower pitch)
+        // E.g., when 5弦A2 and 3弦G3 both detected, 5弦 is lower pitch on lower string = expected
+        winners.sort((a, b) => a.midi - b.midi); // sort by pitch ascending
+
+        // For each detected pitch, prefer the string with the LOWEST string number (thickest)
+        // that can physically produce it (open string or fretted position exists)
+        for (let i = 0; i < winners.length; i++) {
+            const current = winners[i];
+            // Check if a lower (thicker) string also detected a similar or lower pitch
+            for (let j = 0; j < i; j++) {
+                const lower = winners[j];
+                if (lower.s > current.s) { // lower string number = thicker string
+                    // If thicker string has similar or lower pitch, it's the real source
+                    // The thinner string's detection is sympathetic resonance
+                    if (Math.abs(lower.midi - current.midi) <= 7) { // within a 5th
+                        current.likelyResonance = true;
+                        console.log(`String ${current.s+1} likely resonance from string ${lower.s+1}`);
+                    }
                 }
             }
-            if (!ghost) kept.push(c);
         }
+
+        // Filter out likely resonances before applying score threshold
+        winners = winners.filter(w => !w.likelyResonance);
+
+        // Re-find strongest after resonance filtering
+        strongest = winners[0];
+        for (const w of winners) {
+            if (w.score > strongest.score) {
+                strongest = w;
+            }
+        }
+
+        // Only keep other candidates if they are within 80% of the strongest score
+        // (real chord: all strings plucked together with similar energy)
+        // Raised from 70% to 80% for even stricter filtering
+        const CHORD_THRESHOLD = 0.80;
+        const kept = [strongest];
+
+        for (const c of winners) {
+            if (c === strongest) continue;
+
+            // Chord test: similar energy level
+            if (c.score >= strongest.score * CHORD_THRESHOLD) {
+                // Additional check: not a harmonic relationship
+                const cFreq = 440 * Math.pow(2, (c.midi - 69) / 12);
+                const sFreq = 440 * Math.pow(2, (strongest.midi - 69) / 12);
+                const ratio = cFreq / sFreq;
+                const invRatio = sFreq / cFreq;
+
+                let isHarmonic = false;
+                // Check if c is a harmonic of strongest
+                if (ratio > 1.9 && ratio < 16.1) {
+                    const n = Math.round(ratio);
+                    if (Math.abs(ratio - n) < 0.03) {
+                        isHarmonic = true;
+                        console.log(`Suppressed: String ${c.s+1} is ${n}th harmonic of strongest string ${strongest.s+1}`);
+                    }
+                }
+                // Check if strongest is a harmonic of c
+                if (!isHarmonic && invRatio > 1.9 && invRatio < 16.1) {
+                    const n = Math.round(invRatio);
+                    if (Math.abs(invRatio - n) < 0.03) {
+                        isHarmonic = true;
+                        console.log(`Suppressed: String ${c.s+1} (strongest is its ${n}th harmonic)`);
+                    }
+                }
+
+                if (!isHarmonic) {
+                    kept.push(c);
+                }
+            } else {
+                console.log(`Suppressed: String ${c.s+1} too weak (${(c.score/strongest.score*100).toFixed(0)}% of strongest)`);
+            }
+        }
+
+        // DEBUG: Log what survived filtering
+        if (kept.length > 0 && kept.length !== winners.length) {
+            console.log('=== After filtering ===');
+            kept.forEach(k => {
+                const note = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][k.midi % 12];
+                const octave = Math.floor(k.midi / 12) - 1;
+                console.log(`Kept: String ${k.s+1}, ${note}${octave} (MIDI ${k.midi}), score=${k.score.toFixed(2)}`);
+            });
+        }
+
         // Same MIDI pitch on two strings → keep the stronger (lower fret on tie).
         const byMidi = {};
         for (const c of kept) (byMidi[c.midi] = byMidi[c.midi] || []).push(c);
@@ -348,10 +562,31 @@
         const keys = new Set(detected.map(d => d.s + ':' + d.f));
         for (const d of detected) {
             const k = d.s + ':' + d.f;
-            if (!activeNotes.has(k)) activeNotes.set(k, { t: now, s: d.s, f: d.f, midi: d.midi });
+            let entry = activeNotes.get(k);
+            if (entry) {
+                entry.misses = 0;
+            } else if (pending.has(k)) {
+                const p = pending.get(k);
+                p.seen++;
+                if (p.seen >= ONSET_FRAMES) {
+                    pending.delete(k);
+                    activeNotes.set(k, { t: now, s: d.s, f: d.f, midi: d.midi, misses: 0 });
+                }
+            } else {
+                pending.set(k, { s: d.s, f: d.f, midi: d.midi, seen: 1 });
+            }
         }
+        // Pending candidates that vanished are transient noise — drop.
+        for (const [k] of pending) if (!keys.has(k)) pending.delete(k);
         for (const [k, entry] of activeNotes) {
-            if (!keys.has(k)) { closeNote(entry, now); activeNotes.delete(k); }
+            if (!keys.has(k)) {
+                // Grace period: a note may flicker out of detection for a
+                // few frames mid-sustain (fundamental dips below the gate
+                // while the string still rings). Closing instantly is what
+                // turns a sustain into short, chopped blocks.
+                entry.misses++;
+                if (entry.misses > MISS_GRACE_FRAMES) { closeNote(entry, now); activeNotes.delete(k); }
+            }
         }
     }
 
@@ -362,8 +597,20 @@
             elNote.textContent = detected.map(d => midiToName(d.midi)).join(' ');
             elFreq.textContent = '';
             elPos.textContent = detected.map(d => STRING_NAMES[d.s] + d.f).join(' · ');
+
+            // Update root note display (lowest detected MIDI note)
+            const rootMidi = Math.min(...detected.map(d => d.midi));
+            const rootFreq = 440 * Math.pow(2, (rootMidi - 69) / 12);
+            if (elRootNote) {
+                elRootNote.textContent = midiToName(rootMidi);
+            }
+            if (elRootFreq) {
+                elRootFreq.textContent = rootFreq.toFixed(1) + ' Hz';
+            }
         } else {
             elNote.textContent = '—'; elFreq.textContent = ''; elPos.textContent = '';
+            if (elRootNote) elRootNote.textContent = '—';
+            if (elRootFreq) elRootFreq.textContent = '— Hz';
         }
     }
 
@@ -374,6 +621,9 @@
         if (!webAudioOk && !audioAvailable) {
             show = true; title = 'No audio input available';
             body = 'Web Audio capture failed and the native audio engine is unavailable. Plug in your Rocksmith cable and retry.';
+        } else if (webAudioOk && lastPeakDb < -90) {
+            show = true; title = 'Selected input is silent';
+            body = `The selected device is delivering no signal (peak ${lastPeakDb.toFixed(0)}dB). Pick your guitar input in the dropdown — e.g. the C-Media / Rocksmith adapter.`;
         } else if (now - lastHeardAt > SILENCE_OVERLAY_MS / 1000) {
             show = true;
         }
@@ -431,8 +681,12 @@
         webAudioOk = true;
     }
 
-    async function populateDevicePicker() {
-        if (!elDevice) return;
+    // Shared with the player page: the player's Input dropdown calls this
+    // with its own <select> so both pickers list the same devices and
+    // preselect the same one (native engine device, else USB/guitar-ish).
+    async function populateDevicePicker(select) {
+        const el = select || elDevice;
+        if (!el) return;
         try {
             const devs = await navigator.mediaDevices.enumerateDevices();
             const inputs = devs.filter(d => d.kind === 'audioinput');
@@ -446,7 +700,15 @@
                     if (m) preselect = m.deviceId;
                 }
             } catch { /* ignore */ }
-            elDevice.innerHTML = '<option value="">Default</option>' + inputs.map(d =>
+            // No native engine to match (plain Chrome): prefer a
+            // USB/Rocksmith/guitar-looking device over the built-in mic —
+            // the mic reads as digital silence for an electric guitar and
+            // makes Free Play look dead.
+            if (!preselect) {
+                const m = inputs.find(d => d.label && /usb|rocksmith|guitar|audio device/i.test(d.label));
+                if (m) preselect = m.deviceId;
+            }
+            el.innerHTML = '<option value="">Default</option>' + inputs.map(d =>
                 `<option value="${d.deviceId}"${d.deviceId === preselect ? ' selected' : ''}>${d.label || ('Device ' + (d.deviceId || '').slice(0, 6))}</option>`).join('');
         } catch { /* ignore */ }
     }
@@ -456,6 +718,18 @@
             const stream = await acquireStream(null); // default first to obtain permission + labels
             buildGraph(stream);
             await populateDevicePicker();
+            if (elDevice && elDevice.value) {
+                // A USB/guitar device was preselected — capture it right
+                // away instead of leaving the stream on the default (often
+                // the built-in mic).
+                await switchDevice(elDevice.value);
+            }
+            console.log('Free Play: Web Audio capture initialized', {
+                sampleRate: audioCtx.sampleRate,
+                fftSize: FFT_SIZE,
+                device: micStream && micStream.getAudioTracks().length
+                    ? micStream.getAudioTracks()[0].label : (elDevice && elDevice.value ? elDevice.value : 'default'),
+            });
         } catch (e) {
             console.warn('Free Play: Web Audio capture failed, falling back to JUCE pitch detection', e);
             webAudioOk = false;
@@ -464,8 +738,47 @@
 
     async function switchDevice(deviceId) {
         if (!deviceId) { await setupWebAudio(); return; }
-        try { buildGraph(await acquireStream(deviceId)); }
-        catch (e) { console.warn('Free Play: device switch failed', e); }
+        try {
+            buildGraph(await acquireStream(deviceId));
+            console.log('Free Play: input device switched to', micStream.getAudioTracks()[0].label);
+        } catch (e) {
+            console.warn('Free Play: device switch failed, re-enumerating', e);
+            // Stale deviceId after a re-plug is the common cause — the
+            // device re-enumerates with a new ID and the exact match
+            // throws. Refresh the list and retry by label.
+            try {
+                const devs = await navigator.mediaDevices.enumerateDevices();
+                const old = devs.find(d => d.deviceId === deviceId);
+                const m = old && old.label
+                    ? devs.find(d => d.kind === 'audioinput' && d.deviceId !== deviceId && d.label === old.label)
+                    : null;
+                if (m) {
+                    buildGraph(await acquireStream(m.deviceId));
+                    console.log('Free Play: input device switched to', micStream.getAudioTracks()[0].label, '(after re-enumeration)');
+                } else {
+                    console.error('Free Play: no device matches the failed switch target');
+                }
+            } catch (e2) {
+                console.error('Free Play: device switch retry failed', e2);
+            }
+        }
+    }
+
+    // ── UI controls ──────────────────────────────────────────────────────
+    function toggleMirror() {
+        mirrored = !mirrored;
+        if (elMirrorBtn) {
+            elMirrorBtn.classList.toggle('bg-accent', mirrored);
+            elMirrorBtn.classList.toggle('text-white', mirrored);
+        }
+    }
+
+    function toggleTilt() {
+        tilted = !tilted;
+        if (elTiltBtn) {
+            elTiltBtn.classList.toggle('bg-accent', tilted);
+            elTiltBtn.classList.toggle('text-white', tilted);
+        }
     }
 
     // ── Recording / playback controls ────────────────────────────────────
@@ -629,13 +942,20 @@
         elTuning = $('fp-tuning'); elCapo = $('fp-capo'); elDevice = $('fp-device');
         elRec = $('fp-rec'); elPlay = $('fp-play'); elLoopBtn = $('fp-loop'); elClear = $('fp-clear'); elRecTime = $('fp-rec-time');
         elExpMidi = $('fp-exp-midi'); elExpAudio = $('fp-exp-audio');
+        elRootNote = $('fp-root-note'); elRootFreq = $('fp-root-freq');
+        elMirrorBtn = $('fp-mirror'); elTiltBtn = $('fp-tilt');
         if (!canvas) return;
         ctx = canvas.getContext('2d');
         resize();
         window.addEventListener('resize', resize);
-        if (elDevice) elDevice.addEventListener('change', () => switchDevice(elDevice.value));
+        if (elDevice) elDevice.addEventListener('change', () => {
+            switchDevice(elDevice.value);
+            // Keep the player page's copy of the dropdown in sync.
+            const playerSel = document.getElementById('player-device');
+            if (playerSel) playerSel.value = elDevice.value;
+        });
 
-        notes = []; activeNotes.clear(); session = []; sessionDur = 0; playback = null;
+        notes = []; activeNotes.clear(); pending.clear(); session = []; sessionDur = 0; playback = null;
         lastHeardAt = performance.now() / 1000;
 
         // Primary path: Web Audio. The native engine is only needed for
@@ -644,6 +964,9 @@
         const audio = window.slopsmithDesktop && window.slopsmithDesktop.audio;
         try { audioAvailable = audio ? !!(await audio.isAvailable()) : false; } catch { audioAvailable = false; }
         await setupWebAudio();
+        console.log('Free Play: input path =', webAudioOk
+            ? 'Web Audio (polyphonic)'
+            : (audioAvailable ? 'JUCE fallback (monophonic)' : 'NONE — no audio input'));
         updateRecButtons();
 
         running = true; lastPollAt = 0;
@@ -656,12 +979,20 @@
         window.removeEventListener('resize', resize);
         // Finalize any in-flight recording so its audio blob completes.
         finalizeRecording(performance.now() / 1000);
-        notes = []; activeNotes.clear();
+        notes = []; activeNotes.clear(); pending.clear();
         playback = null;
         // Release the mic so the indicator turns off when leaving Free Play.
         if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
         if (audioCtx && audioCtx.state !== 'closed') { try { audioCtx.suspend(); } catch { /* ignore */ } }
     }
 
-    window.freeplay = { start, stop, toggleRecord, togglePlay, toggleLoop, clearSession, exportMidi, exportAudio };
+    window.freeplay = { start, stop, toggleRecord, togglePlay, toggleLoop, clearSession, exportMidi, exportAudio, toggleMirror, toggleTilt, populateDevicePicker, switchDevice };
+    // Debug interface
+    window.freeplay.__debug = {
+        get webAudioOk() { return webAudioOk; },
+        get analyser() { return analyser; },
+        get sampleRate() { return sampleRate; },
+        get audioCtx() { return audioCtx; },
+        get activeNotes() { return Array.from(activeNotes.entries()); }
+    };
 })();

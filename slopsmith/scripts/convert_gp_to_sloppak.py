@@ -88,6 +88,14 @@ def _beats_for(duration: float, bpm: float = 120.0):
     return out
 
 
+def _slug_for(gp_path: Path) -> str:
+    """Output dir name for a GP file: stem + short path hash so files with
+    the same stem in different subdirs never collide."""
+    import hashlib
+    path_hash = hashlib.md5(str(gp_path).encode("utf-8", "replace")).hexdigest()[:6]
+    return _safe(f"{gp_path.stem}-{path_hash}")
+
+
 def convert_one(gp_path: Path, out_dir: Path) -> str | None:
     name = gp_path.name
     try:
@@ -108,9 +116,7 @@ def convert_one(gp_path: Path, out_dir: Path) -> str | None:
 
     # Slug from the source filename stem (proper UTF-8, unique per file) +
     # a short path hash to guarantee no collisions across subdirs.
-    import hashlib
-    path_hash = hashlib.md5(str(gp_path).encode("utf-8", "replace")).hexdigest()[:6]
-    slug = _safe(f"{gp_path.stem}-{path_hash}")
+    slug = _slug_for(gp_path)
     spath = out_dir / f"{slug}.sloppak"
     if spath.exists():
         shutil.rmtree(spath)
@@ -210,23 +216,54 @@ def convert_one(gp_path: Path, out_dir: Path) -> str | None:
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: convert_gp_to_sloppak.py <gp_file_or_dir> <out_dlc_dir>")
-        sys.exit(2)
-    src = Path(sys.argv[1])
-    out = Path(sys.argv[2])
+    import argparse
+    import concurrent.futures
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("src", help="GP file or directory to convert (.gp3/.gp4/.gp5)")
+    ap.add_argument("out", help="output DLC directory for .sloppak dirs")
+    ap.add_argument("--limit", type=int, default=0, help="only convert the first N files (after sorting)")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="skip outputs that already have a manifest.yaml")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel processes (1 = serial, current default)")
+    args = ap.parse_args()
+
+    src = Path(args.src)
+    out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     if src.is_file():
         files = [src]
     else:
         files = [p for p in sorted(src.rglob("*"))
                  if p.is_file() and p.suffix.lower() in (".gp3", ".gp4", ".gp5")]
-    print(f"Converting {len(files)} GP file(s) -> {out}")
-    ok = 0
+    if args.limit > 0:
+        files = files[:args.limit]
+
+    skipped = 0
+    todo = []
     for f in files:
-        if convert_one(f, out):
-            ok += 1
-    print(f"Done: {ok}/{len(files)} converted.")
+        if args.skip_existing:
+            spath = out / f"{_slug_for(f)}.sloppak"
+            if spath.is_dir() and (spath / "manifest.yaml").exists():
+                print(f"  SKIP {f.name} (already converted)", flush=True)
+                skipped += 1
+                continue
+        todo.append(f)
+    print(f"Converting {len(todo)} GP file(s) -> {out}" + (f" ({skipped} skipped)" if skipped else ""))
+
+    if args.workers > 1:
+        # macOS spawn: convert_one is a self-contained module-level function,
+        # so functools.partial pickles fine (a lambda would not); worker
+        # import warmup is ~1-2s each.
+        import functools
+        worker = functools.partial(convert_one, out_dir=out)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
+            results = list(executor.map(worker, todo))
+    else:
+        results = [convert_one(f, out) for f in todo]
+
+    ok = sum(1 for r in results if r)
+    print(f"Done: {ok}/{len(todo)} converted.")
 
 
 if __name__ == "__main__":

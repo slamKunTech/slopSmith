@@ -7,16 +7,18 @@ import sys
 import tempfile
 import shutil
 from pathlib import Path
+from urllib.parse import unquote
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
-from psarc import unpack_psarc, read_psarc_entries
-from song import load_song, phrase_to_wire, arrangement_string_count
-from audio import find_wem_files, convert_wem
-from tunings import tuning_name
-import sloppak as sloppak_mod
+from lib.psarc import unpack_psarc, read_psarc_entries
+from lib.song import load_song, phrase_to_wire, arrangement_string_count
+from lib.audio import find_wem_files, convert_wem
+from lib.tunings import tuning_name
+from lib import sloppak as sloppak_mod
+from lib import meta_repair
 
 import concurrent.futures
 import sqlite3
@@ -24,6 +26,19 @@ import threading
 import xml.etree.ElementTree as ET
 
 app = FastAPI(title="Rocksmith Web")
+
+
+@app.middleware("http")
+async def _no_cache_assets(request, call_next):
+    # The desktop app (Electron) caches aggressively by heuristic when no
+    # Cache-Control is present, so after editing static files users end up
+    # with new HTML but stale JS (buttons that silently do nothing). Force
+    # revalidation for HTML/JS/CSS — audio and images keep normal caching.
+    response = await call_next(request)
+    p = request.url.path
+    if p == "/" or p.startswith("/static/") or p.endswith((".js", ".css", ".html")):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
 
 STATIC_DIR = Path(__file__).parent / "static"
 try:
@@ -80,6 +95,10 @@ class MetadataDB:
             self.conn.execute("ALTER TABLE songs ADD COLUMN stem_count INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        try:
+            self.conn.execute("ALTER TABLE songs ADD COLUMN hidden INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_artist ON songs(artist COLLATE NOCASE)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_songs_title ON songs(title COLLATE NOCASE)")
         self.conn.execute("CREATE TABLE IF NOT EXISTS favorites (filename TEXT PRIMARY KEY)")
@@ -134,19 +153,20 @@ class MetadataDB:
         with self._lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO songs "
-                "(filename, mtime, size, title, artist, album, year, duration, tuning, arrangements, has_lyrics, format, stem_count) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(filename, mtime, size, title, artist, album, year, duration, tuning, arrangements, has_lyrics, format, stem_count, hidden) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (filename, mtime, size, meta.get("title", ""), meta.get("artist", ""),
                  meta.get("album", ""), meta.get("year", ""), meta.get("duration", 0),
                  meta.get("tuning", ""), json.dumps(meta.get("arrangements", [])),
                  1 if meta.get("has_lyrics") else 0,
                  meta.get("format", "psarc"),
-                 int(meta.get("stem_count", 0) or 0)),
+                 int(meta.get("stem_count", 0) or 0),
+                 1 if meta.get("hidden") else 0),
             )
             self.conn.commit()
 
     def count(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) FROM songs WHERE title != ''").fetchone()[0]
+        return self.conn.execute("SELECT COUNT(*) FROM songs WHERE title != '' AND hidden = 0").fetchone()[0]
 
     def delete_missing(self, current_filenames: set[str]):
         """Remove DB entries for files no longer on disk."""
@@ -174,7 +194,7 @@ class MetadataDB:
                    favorites_only: bool = False,
                    format_filter: str = "") -> tuple[list[dict], int]:
         """Server-side paginated search. Returns (songs, total_count)."""
-        where = "WHERE title != ''"
+        where = "WHERE title != '' AND hidden = 0"
         params = []
         if favorites_only:
             where += " AND filename IN (SELECT filename FROM favorites)"
@@ -221,7 +241,7 @@ class MetadataDB:
                       page: int = 0, size: int = 50,
                       format_filter: str = "") -> tuple[list[dict], int]:
         """Get artists grouped by letter with their albums and songs. Returns (artists, total_artists)."""
-        where = "WHERE title != ''"
+        where = "WHERE title != '' AND hidden = 0"
         params = []
         if favorites_only:
             where += " AND filename IN (SELECT filename FROM favorites)"
@@ -300,11 +320,12 @@ class MetadataDB:
     def query_stats(self, favorites_only: bool = False) -> dict:
         """Aggregate stats for the letter bar."""
         filt = " AND filename IN (SELECT filename FROM favorites)" if favorites_only else ""
-        total = self.conn.execute(f"SELECT COUNT(*) FROM songs WHERE title != ''{filt}").fetchone()[0]
-        artist_count = self.conn.execute(f"SELECT COUNT(DISTINCT artist) FROM songs WHERE title != ''{filt}").fetchone()[0]
+        base = f"title != '' AND hidden = 0{filt}"
+        total = self.conn.execute(f"SELECT COUNT(*) FROM songs WHERE {base}").fetchone()[0]
+        artist_count = self.conn.execute(f"SELECT COUNT(DISTINCT artist) FROM songs WHERE {base}").fetchone()[0]
         rows = self.conn.execute(
             f"SELECT UPPER(SUBSTR(artist, 1, 1)) as letter, COUNT(DISTINCT artist COLLATE NOCASE) "
-            f"FROM songs WHERE title != ''{filt} GROUP BY letter"
+            f"FROM songs WHERE {base} GROUP BY letter"
         ).fetchall()
         letters = {}
         for letter, count in rows:
@@ -318,13 +339,27 @@ class MetadataDB:
 meta_db = MetadataDB()
 
 
-def _get_dlc_dir() -> Path | None:
+def _get_dlc_dirs() -> list[Path]:
+    """All DLC roots: primary first (env DLC_DIR, else config dlc_dir),
+    then each config `dlc_dirs` entry. Deduped by realpath, existing dirs only."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
+        try:
+            key = os.path.realpath(p)
+        except OSError:
+            key = str(p.absolute())
+        if key not in seen:
+            seen.add(key)
+            roots.append(p)
+
     # Only consider DLC_DIR if the env var was non-empty. `Path("")` collapses
     # to `.` and reports `.is_dir() == True`, which would silently shadow the
     # config.json fallback. Checking the raw env string preserves
     # `DLC_DIR=.` as a valid opt-in for cwd while keeping unset/empty out.
     if _DLC_DIR_ENV and DLC_DIR.is_dir():
-        return DLC_DIR
+        _add(DLC_DIR)
     config_file = CONFIG_DIR / "config.json"
     if config_file.exists():
         try:
@@ -333,10 +368,70 @@ def _get_dlc_dir() -> Path | None:
             if raw:
                 p = Path(raw)
                 if p.is_dir():
-                    return p
+                    _add(p)
+            for entry in cfg.get("dlc_dirs") or []:
+                if isinstance(entry, str) and entry.strip():
+                    p = Path(entry.strip())
+                    if p.is_dir():
+                        _add(p)
         except Exception:
             pass
+    return roots
+
+
+def _get_dlc_dir() -> Path | None:
+    dirs = _get_dlc_dirs()
+    return dirs[0] if dirs else None
+
+
+def _rel_key(root: Path, is_primary: bool, f: Path) -> str:
+    """DB key for a scanned file: plain path relative to the primary root,
+    '<root_basename>/<rel>' on extra roots so keys stay unique across roots."""
+    try:
+        rel = f.relative_to(root).as_posix()
+    except ValueError:
+        rel = f.name
+    return rel if is_primary else f"{root.name}/{rel}"
+
+
+def _resolve_song_path(filename: str) -> Path | None:
+    """Resolve a DB key to an on-disk path across all DLC roots.
+
+    Namespaced keys ('<extra_root>/<rel>') are tried first so an extra
+    root wins deterministically over any colliding plain primary key."""
+    roots = _get_dlc_dirs()
+    if not roots:
+        return None
+    if "/" in filename:
+        head, rest = filename.split("/", 1)
+        for root in roots[1:]:
+            if root.name == head:
+                p = root / rest
+                if p.exists():
+                    return p
+    for root in roots:
+        p = root / filename
+        if p.exists():
+            return p
     return None
+
+
+def _key_for_path(p: Path) -> str:
+    """Inverse of _resolve_song_path: DB key for an absolute path on disk
+    (used by the retune endpoint when writing output files)."""
+    roots = _get_dlc_dirs()
+    if not roots:
+        return p.name
+    try:
+        return p.relative_to(roots[0]).as_posix()
+    except ValueError:
+        pass
+    for root in roots[1:]:
+        try:
+            return f"{root.name}/{p.relative_to(root).as_posix()}"
+        except ValueError:
+            continue
+    return p.name
 
 
 # ── Background metadata scan ──────────────────────────────────────────────────
@@ -425,6 +520,9 @@ def _extract_meta_sloppak(path: Path) -> dict:
     offsets = meta.pop("tuning_offsets", None) or [0] * 6
     meta["tuning"] = tuning_name(offsets)
     meta["format"] = "sloppak"
+    # Repair GBK-as-BIG5 mojibake, swapped title/artist, and junk titles;
+    # flags the row hidden when no recoverable name exists.
+    meta_repair.repair_meta(meta, path.name)
     return meta
 
 
@@ -474,53 +572,54 @@ _scan_status = dict(_SCAN_STATUS_INIT)
 
 
 def _background_scan():
-    """Scan all PSARCs and cache metadata on startup. Uses thread pool for parallelism."""
+    """Scan all PSARCs across every DLC root and cache metadata on startup.
+    Uses thread pool for parallelism. Songs from the primary root keep plain
+    rel-path keys (backward compat); extra roots get '<root>/<rel>' keys."""
     global _scan_status
     _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "listing"}
 
-    dlc = _get_dlc_dir()
-    if not dlc:
+    roots = _get_dlc_dirs()
+    if not roots:
         _scan_status = {**_SCAN_STATUS_INIT, "stage": "idle", "error": "DLC folder not configured"}
         print("Scan: no DLC folder configured", flush=True)
         return
 
     # Listing can fail on macOS without Full Disk Access, or on Docker if the
     # path isn't shared. Report the failure explicitly rather than silently
-    # appearing to scan nothing.
-    try:
-        # Skip RS1 compatibility mega-PSARCs (multi-song, not individually playable)
-        psarcs = [f for f in sorted(dlc.rglob("*.psarc"))
-                  if f.is_file()
-                  and "rs1compatibility" not in f.name.lower()]
-        # Sloppaks: match both file (zip) and directory form by suffix.
-        sloppaks = [f for f in sorted(dlc.rglob("*.sloppak"))
-                    if sloppak_mod.is_sloppak(f)]
-    except PermissionError as e:
-        msg = (f"Permission denied reading {dlc}. "
-               "On macOS: grant Full Disk Access to the app in System Settings → Privacy & Security. "
-               "With Docker: share this path in Docker Desktop → Settings → Resources → File Sharing.")
-        print(f"Scan failed: {msg} ({e})", flush=True)
-        _scan_status = {**_SCAN_STATUS_INIT, "stage": "error", "error": msg}
-        return
-    except OSError as e:
-        print(f"Scan failed listing {dlc}: {e}", flush=True)
-        _scan_status = {**_SCAN_STATUS_INIT, "stage": "error", "error": f"Unable to list {dlc}: {e}"}
-        return
-
-    all_songs = psarcs + sloppaks
-    print(f"Scan: listed {len(psarcs)} PSARCs and {len(sloppaks)} sloppaks in {dlc}", flush=True)
-
-    def _rel(f: Path) -> str:
-        # Store the path relative to the DLC root so sub-folders (e.g.
-        # dlc/sloppak/foo.sloppak produced by the converter) resolve back
-        # correctly later. PSARCs always live directly in dlc/, so this
-        # reduces to f.name for them.
+    # appearing to scan nothing. A broken primary root aborts (existing
+    # behavior); a broken extra root only warns and is skipped.
+    all_songs: list[tuple[Path, str]] = []
+    for i, dlc in enumerate(roots):
+        is_primary = i == 0
         try:
-            return f.relative_to(dlc).as_posix()
-        except ValueError:
-            return f.name
+            # Skip RS1 compatibility mega-PSARCs (multi-song, not individually playable)
+            psarcs = [f for f in sorted(dlc.rglob("*.psarc"))
+                      if f.is_file()
+                      and "rs1compatibility" not in f.name.lower()]
+            # Sloppaks: match both file (zip) and directory form by suffix.
+            sloppaks = [f for f in sorted(dlc.rglob("*.sloppak"))
+                        if sloppak_mod.is_sloppak(f)]
+        except PermissionError as e:
+            msg = (f"Permission denied reading {dlc}. "
+                   "On macOS: grant Full Disk Access to the app in System Settings → Privacy & Security. "
+                   "With Docker: share this path in Docker Desktop → Settings → Resources → File Sharing.")
+            print(f"Scan failed: {msg} ({e})", flush=True)
+            if is_primary:
+                _scan_status = {**_SCAN_STATUS_INIT, "stage": "error", "error": msg}
+                return
+            continue
+        except OSError as e:
+            print(f"Scan failed listing {dlc}: {e}", flush=True)
+            if is_primary:
+                _scan_status = {**_SCAN_STATUS_INIT, "stage": "error", "error": f"Unable to list {dlc}: {e}"}
+                return
+            continue
 
-    current_files = {_rel(f) for f in all_songs}
+        print(f"Scan: listed {len(psarcs)} PSARCs and {len(sloppaks)} sloppaks in {dlc}", flush=True)
+        for f in psarcs + sloppaks:
+            all_songs.append((f, _rel_key(dlc, is_primary, f)))
+
+    current_files = {key for _, key in all_songs}
 
     # Clean up stale DB entries
     stale = meta_db.delete_missing(current_files)
@@ -529,10 +628,10 @@ def _background_scan():
 
     # Figure out which need scanning
     to_scan = []
-    for f in all_songs:
+    for f, key in all_songs:
         stat = f.stat()
-        if not meta_db.get(_rel(f), stat.st_mtime, stat.st_size):
-            to_scan.append((f, stat))
+        if not meta_db.get(key, stat.st_mtime, stat.st_size):
+            to_scan.append((f, key, stat))
 
     if not to_scan:
         _scan_status = {**_SCAN_STATUS_INIT, "stage": "complete"}
@@ -540,18 +639,18 @@ def _background_scan():
         return
 
     _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "scanning", "total": len(to_scan)}
-    print(f"Library: {len(psarcs)} PSARCs + {len(sloppaks)} sloppaks, {len(all_songs) - len(to_scan)} cached, {len(to_scan)} to scan", flush=True)
+    print(f"Library: {len(all_songs)} songs, {len(all_songs) - len(to_scan)} cached, {len(to_scan)} to scan", flush=True)
 
     def _scan_one(item):
-        f, stat = item
+        f, key, stat = item
         # Per-file log so users running the server / desktop can see live
         # activity and distinguish a stuck scan from a slow one.
-        print(f"  scanning {f.name}", flush=True)
+        print(f"  scanning {key}", flush=True)
         meta = _extract_meta_for_file(f)
-        return _rel(f), stat.st_mtime, stat.st_size, meta
+        return key, stat.st_mtime, stat.st_size, meta
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(_scan_one, item): item[0].name for item in to_scan}
+        futures = {executor.submit(_scan_one, item): item[1] for item in to_scan}
         for future in concurrent.futures.as_completed(futures):
             fname = futures[future]
             try:
@@ -785,7 +884,8 @@ def _default_settings():
     # the explicit guard we'd surface `"."` to /api/settings — and any
     # partial-update POST would then persist that into config.json,
     # silently undoing the env-var fix on the next load.
-    return {"dlc_dir": str(DLC_DIR) if (_DLC_DIR_ENV and DLC_DIR.is_dir()) else ""}
+    return {"dlc_dir": str(DLC_DIR) if (_DLC_DIR_ENV and DLC_DIR.is_dir()) else "",
+            "dlc_dirs": []}
 
 
 def _load_config(config_file):
@@ -845,6 +945,38 @@ def save_settings(data: dict):
                 messages.append(f"DLC folder: {count} .psarc files found")
             else:
                 return {"error": f"DLC directory not found: {dlc_path}"}
+
+    if "dlc_dirs" in data:
+        raw = data["dlc_dirs"]
+        # Extra DLC roots (e.g. GP-converted sloppak folders). Same
+        # partial-update shape as dlc_dir: null is no-op, [] clears,
+        # anything else must be a list of existing directory paths.
+        if raw is None:
+            pass
+        elif not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+            return {"error": "dlc_dirs must be a list of directory path strings"}
+        else:
+            cleaned = []
+            roots = _get_dlc_dirs()
+            primary_real = os.path.realpath(roots[0]) if roots else None
+            for entry in raw:
+                s = entry.strip()
+                if not s:
+                    continue
+                p = Path(s)
+                if not p.is_dir():
+                    return {"error": f"DLC directory not found: {s}"}
+                # Reject entries nested inside the primary root or another
+                # extra — nested roots would double-list songs under two keys.
+                real = os.path.realpath(p)
+                if primary_real and (real == primary_real or real.startswith(primary_real + os.sep)):
+                    return {"error": f"Extra DLC folder must not be inside the primary DLC folder: {s}"}
+                for other in cleaned:
+                    other_real = os.path.realpath(Path(other))
+                    if real == other_real or real.startswith(other_real + os.sep) or other_real.startswith(real + os.sep):
+                        return {"error": f"Extra DLC folders must not overlap: {s}"}
+                cleaned.append(s)
+            cfg["dlc_dirs"] = cleaned
 
     # Both of these are consumed downstream as strings (e.g.
     # demucs_server_url.rstrip('/') in lib/sloppak_convert.py), so
@@ -910,14 +1042,8 @@ async def ws_retune(websocket: WebSocket, filename: str, target: str = "E Standa
     import asyncio
     await websocket.accept()
 
-    dlc = _get_dlc_dir()
-    if not dlc:
-        await websocket.send_json({"error": "DLC folder not configured"})
-        await websocket.close()
-        return
-
-    psarc_path = dlc / filename
-    if not psarc_path.exists():
+    psarc_path = _resolve_song_path(unquote(filename))
+    if psarc_path is None:
         await websocket.send_json({"error": "File not found"})
         await websocket.close()
         return
@@ -992,14 +1118,14 @@ async def ws_retune(websocket: WebSocket, filename: str, target: str = "E Standa
                 try:
                     meta = _extract_meta_for_file(new_path)
                     stat = new_path.stat()
-                    meta_db.put(new_path.name, stat.st_mtime, stat.st_size, meta)
+                    meta_db.put(_key_for_path(new_path), stat.st_mtime, stat.st_size, meta)
                 except Exception:
                     pass
 
             progress_queue.put_nowait({
                 "done": True, "progress": 100,
                 "stage": "Complete!",
-                "filename": new_path.name,
+                "filename": _key_for_path(new_path),
             })
 
         except Exception as e:
@@ -1030,18 +1156,15 @@ async def ws_retune(websocket: WebSocket, filename: str, target: str = "E Standa
 async def get_song_art(filename: str):
     """Extract and serve album art from a PSARC as PNG."""
     import asyncio
-    dlc = _get_dlc_dir()
-    if not dlc:
-        return JSONResponse({"error": "not configured"}, 404)
-
-    psarc_path = dlc / filename
-    if not psarc_path.exists():
+    filename = unquote(filename)
+    psarc_path = _resolve_song_path(filename)
+    if psarc_path is None:
         return JSONResponse({"error": "not found"}, 404)
 
     # Sloppak path: pull cover.jpg from the source dir (manifest-declared or default).
     if sloppak_mod.is_sloppak(psarc_path):
         try:
-            src = sloppak_mod.resolve_source_dir(filename, dlc, SLOPPAK_CACHE_DIR)
+            src = sloppak_mod.resolve_source_dir(psarc_path, unquote(filename), SLOPPAK_CACHE_DIR)
             manifest = sloppak_mod.load_manifest(psarc_path)
             cover_rel = str(manifest.get("cover") or "cover.jpg")
             cover_path = (src / cover_rel).resolve()
@@ -1146,12 +1269,9 @@ async def upload_song_art_b64(filename: str, data: dict):
 async def get_song_info(filename: str):
     """Return song metadata, from cache or by extracting PSARC."""
     import asyncio
-    dlc = _get_dlc_dir()
-    if not dlc:
-        return JSONResponse({"error": "DLC folder not configured"}, 404)
-
-    psarc_path = dlc / filename
-    if not psarc_path.exists():
+    filename = unquote(filename)
+    psarc_path = _resolve_song_path(filename)
+    if psarc_path is None:
         return JSONResponse({"error": "File not found"}, 404)
 
     stat = psarc_path.stat()
@@ -1208,13 +1328,14 @@ def _get_or_extract(filename, psarc_path):
 @app.get("/api/sloppak/{filename:path}/file/{rel_path:path}")
 def serve_sloppak_file(filename: str, rel_path: str):
     """Serve a file from inside a sloppak (stems, cover, etc.)."""
+    filename = unquote(filename)
     src = sloppak_mod.get_cached_source_dir(filename)
     if src is None:
-        dlc = _get_dlc_dir()
-        if not dlc:
-            return JSONResponse({"error": "not configured"}, 404)
+        path = _resolve_song_path(filename)
+        if path is None:
+            return JSONResponse({"error": "not found"}, 404)
         try:
-            src = sloppak_mod.resolve_source_dir(filename, dlc, SLOPPAK_CACHE_DIR)
+            src = sloppak_mod.resolve_source_dir(path, filename, SLOPPAK_CACHE_DIR)
         except Exception:
             return JSONResponse({"error": "not found"}, 404)
     # Prevent path traversal.
@@ -1242,14 +1363,8 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
     """Stream song data for the highway renderer over WebSocket."""
     await websocket.accept()
 
-    dlc = _get_dlc_dir()
-    if not dlc:
-        await websocket.send_json({"error": "DLC folder not configured"})
-        await websocket.close()
-        return
-
-    psarc_path = dlc / filename
-    if not psarc_path.exists():
+    psarc_path = _resolve_song_path(unquote(filename))
+    if psarc_path is None:
         await websocket.send_json({"error": "File not found"})
         await websocket.close()
         return
@@ -1279,7 +1394,7 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
                 SLOPPAK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 loaded_slop = await loop.run_in_executor(
                     None,
-                    lambda: sloppak_mod.load_song(filename, dlc, SLOPPAK_CACHE_DIR),
+                    lambda: sloppak_mod.load_song(psarc_path, unquote(filename), SLOPPAK_CACHE_DIR),
                 )
                 song = loaded_slop.song
                 tmp = str(loaded_slop.source_dir)
@@ -1328,7 +1443,7 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
         audio_url = None
         audio_error: str | None = None  # Surfaced in song_info when audio_url is None
         stems_payload: list[dict] = []
-        audio_id = Path(filename).stem.replace(" ", "_")
+        audio_id = Path(filename.replace("/", "_").replace(" ", "_")).stem
 
         if is_slop:
             # Stems are served via the sloppak file endpoint; the first stem

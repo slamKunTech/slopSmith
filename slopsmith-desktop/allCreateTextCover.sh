@@ -1,0 +1,1 @@
+python3 slopsmith/scripts/gen_sloppak_covers.py --force 

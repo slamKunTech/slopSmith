@@ -65,6 +65,33 @@ function highQualityPath(): string {
 }
 
 /**
+ * Path to a FluidR3_GM.sf2 shipped inside the app bundle
+ * (`<RESOURCESPATH>/soundfonts/FluidR3_GM.sf2`). When present, the
+ * "High" quality option is available out of the box without the 142 MB
+ * on-demand download. Returns `null` if no bundled FluidR3 is found.
+ */
+function bundledHighQualityPath(): string | null {
+    const dir = path.join(
+        app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', 'resources'),
+        'soundfonts',
+    );
+    const candidate = path.join(dir, 'FluidR3_GM.sf2');
+    return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Resolves the high-quality soundfont actually available to the app:
+ * the user-downloaded copy in userData if present, otherwise the bundled
+ * copy if present, otherwise `null`. The userData copy always wins so a
+ * redownload can override a stale bundled file.
+ */
+function resolvedHighQualityPath(): string | null {
+    const downloaded = highQualityPath();
+    if (fs.existsSync(downloaded)) return downloaded;
+    return bundledHighQualityPath();
+}
+
+/**
  * Absolute path of the bundled default soundfont
  * (`<RESOURCESPATH>/soundfonts/*.sf2`), matching the core's
  * `_find_soundfont()` fallback. Used as the placeholder shown in the
@@ -96,8 +123,9 @@ export function getActiveSoundfontPath(): string | null {
     if (cfg.soundfontQuality === 'custom' && cfg.soundfontCustomPath && fs.existsSync(cfg.soundfontCustomPath)) {
         return cfg.soundfontCustomPath;
     }
-    if (cfg.soundfontQuality === 'high' && fs.existsSync(highQualityPath())) {
-        return highQualityPath();
+    if (cfg.soundfontQuality === 'high') {
+        const high = resolvedHighQualityPath();
+        if (high) return high;
     }
     return null;
 }
@@ -253,8 +281,8 @@ function cancelDownload(): { success: boolean; message: string } {
 export function initSoundfontManager(getMainWindow: () => BrowserWindow | null): void {
     ipcMain.handle('soundfont:getStatus', () => {
         const cfg = getDesktopConfig();
-        const highPath = highQualityPath();
-        const highDownloaded = fs.existsSync(highPath);
+        const highPath = resolvedHighQualityPath();
+        const highDownloaded = !!highPath;
         const quality: SoundfontQuality =
             cfg.soundfontQuality === 'high' || cfg.soundfontQuality === 'custom'
                 ? cfg.soundfontQuality
@@ -286,7 +314,7 @@ export function initSoundfontManager(getMainWindow: () => BrowserWindow | null):
         if (quality !== 'default' && quality !== 'high' && quality !== 'custom') {
             return { success: false, message: `Unknown quality: ${quality}` };
         }
-        if (quality === 'high' && !fs.existsSync(highQualityPath())) {
+        if (quality === 'high' && !resolvedHighQualityPath()) {
             return { success: false, message: 'High-quality soundfont not downloaded yet' };
         }
         if (quality === 'custom') {

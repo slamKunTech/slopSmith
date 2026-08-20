@@ -345,3 +345,109 @@ def test_get_dlc_dir_ignores_nonexistent_config_dir(tmp_path, server_module):
     (tmp_path / "config.json").write_text(json.dumps({"dlc_dir": str(tmp_path / "no_such_dir")}))
     result = server_module._get_dlc_dir()
     assert result is None
+
+
+# ── dlc_dirs (extra DLC roots) ──────────────────────────────────────────────
+
+def test_dlc_dirs_settings_roundtrip(client, tmp_path):
+    extra = tmp_path / "gp_dlc"
+    extra.mkdir()
+    r = client.post("/api/settings", json={"dlc_dirs": [str(extra)]})
+    assert r.status_code == 200, r.text
+    got = client.get("/api/settings").json()
+    assert got["dlc_dirs"] == [str(extra)]
+
+
+def test_dlc_dirs_rejects_non_list(client):
+    r = client.post("/api/settings", json={"dlc_dirs": "not-a-list"})
+    assert r.status_code == 200
+    assert "error" in r.json()
+
+
+def test_dlc_dirs_rejects_non_string_entries(client, tmp_path):
+    r = client.post("/api/settings", json={"dlc_dirs": [str(tmp_path), 42]})
+    assert r.status_code == 200
+    assert "error" in r.json()
+
+
+def test_dlc_dirs_rejects_missing_dir(client, tmp_path):
+    r = client.post("/api/settings", json={"dlc_dirs": [str(tmp_path / "nope")]})
+    assert r.status_code == 200
+    assert "error" in r.json()
+
+
+def test_dlc_dirs_empty_list_clears(client, tmp_path):
+    extra = tmp_path / "gp_dlc"
+    extra.mkdir()
+    client.post("/api/settings", json={"dlc_dirs": [str(extra)]})
+    r = client.post("/api/settings", json={"dlc_dirs": []})
+    assert r.status_code == 200
+    assert client.get("/api/settings").json()["dlc_dirs"] == []
+
+
+def test_dlc_dirs_preserved_by_single_key_post(client, tmp_path):
+    extra = tmp_path / "gp_dlc"
+    extra.mkdir()
+    client.post("/api/settings", json={"dlc_dirs": [str(extra)]})
+    client.post("/api/settings", json={"av_offset_ms": 42})
+    assert client.get("/api/settings").json()["dlc_dirs"] == [str(extra)]
+
+
+def test_dlc_dirs_rejects_nested_inside_primary(client, tmp_path):
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    client.post("/api/settings", json={"dlc_dir": str(primary)})
+    nested = primary / "sub"
+    nested.mkdir()
+    r = client.post("/api/settings", json={"dlc_dirs": [str(nested)]})
+    assert "error" in r.json()
+
+
+# ── _get_dlc_dirs / _resolve_song_path / _key_for_path ─────────────────────
+
+def test_get_dlc_dirs_dedupes_env_and_config(server_module, tmp_path, monkeypatch):
+    same = tmp_path / "dlc"
+    same.mkdir()
+    monkeypatch.setenv("DLC_DIR", str(same))
+    sys.modules.pop("server", None)
+    mod = importlib.import_module("server")
+    (tmp_path / "config.json").write_text(json.dumps({"dlc_dir": str(same)}))
+    dirs = mod._get_dlc_dirs()
+    assert len(dirs) == 1
+    assert dirs[0] == same
+
+
+def test_get_dlc_dirs_primary_then_extras(server_module, tmp_path):
+    primary = tmp_path / "primary"
+    extra = tmp_path / "extra"
+    missing = tmp_path / "missing"
+    primary.mkdir()
+    extra.mkdir()
+    (tmp_path / "config.json").write_text(json.dumps({
+        "dlc_dir": str(primary),
+        "dlc_dirs": [str(missing), str(extra)],
+    }))
+    dirs = server_module._get_dlc_dirs()
+    assert dirs == [primary, extra]  # missing dropped, order preserved
+
+
+def test_resolve_song_path_namespaced_and_plain(server_module, tmp_path):
+    primary = tmp_path / "primary"
+    extra = tmp_path / "gp_dlc"
+    primary.mkdir()
+    extra.mkdir()
+    (tmp_path / "config.json").write_text(json.dumps({
+        "dlc_dir": str(primary), "dlc_dirs": [str(extra)],
+    }))
+    plain = primary / "plain.sloppak"
+    plain.mkdir()
+    namespaced = extra / "song-ab12cd.sloppak"
+    namespaced.mkdir()
+
+    assert server_module._resolve_song_path("plain.sloppak") == plain
+    assert server_module._resolve_song_path("gp_dlc/song-ab12cd.sloppak") == namespaced
+    assert server_module._resolve_song_path("gp_dlc/missing.sloppak") is None
+    assert server_module._key_for_path(plain) == "plain.sloppak"
+    assert server_module._key_for_path(namespaced) == "gp_dlc/song-ab12cd.sloppak"
+    # _key_for_path on a path outside every root falls back to the name.
+    assert server_module._key_for_path(tmp_path / "elsewhere.sloppak") == "elsewhere.sloppak"

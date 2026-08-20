@@ -61,6 +61,7 @@ function createHighway() {
     let _renderScale = parseFloat(localStorage.getItem('renderScale') || '1');  // 1 = full, 0.5 = half res
     let _inverted = localStorage.getItem('invertHighway') === 'true';
     let _lefty = localStorage.getItem('lefty') === '1';
+    let _tilted = localStorage.getItem('tilted') === '1';
     let _lastChordOnFretLine = null;  // chord object currently shown on fret line
     let _chordFretLineNotes = [];  // notes to render on fret line
     const _frameMismatchWarned = new Set();  // chord ids already warned about (slopsmith#88)
@@ -296,6 +297,15 @@ function createHighway() {
                 updateSmoothAnchor(anchor, 1 / 60);
 
                 ctx.save();
+
+                // Apply tilt first (around center of canvas)
+                if (_tilted) {
+                    ctx.translate(W / 2, H / 2);
+                    ctx.rotate(Math.PI / 4);  // 45 degrees
+                    ctx.translate(-W / 2, -H / 2);
+                }
+
+                // Then apply lefty (horizontal flip)
                 if (_lefty) {
                     ctx.translate(W, 0);
                     ctx.scale(-1, 1);
@@ -577,6 +587,40 @@ function createHighway() {
             ctx.lineTo(W - margin, y);
             ctx.stroke();
         }
+
+        // "Pluck now" cue: when a note's head reaches the now line (its
+        // play instant), the matching legend string flashes with a bright
+        // glow — the player sees exactly which string to pick. Intensity
+        // fades with distance from the note's onset; a chord onset lights
+        // all its strings at once.
+        const NOW_WINDOW = 0.12;  // seconds around the note's exact time
+        const src = _filteredNotes !== null ? _filteredNotes : notes;
+        const lo = bsearch(src, currentTime - NOW_WINDOW);
+        const hi = bsearch(src, currentTime + NOW_WINDOW);
+        const glow = new Array(stringCount).fill(0);
+        for (let i = lo; i < hi; i++) {
+            const n = src[i];
+            const k = 1 - Math.abs(n.t - currentTime) / NOW_WINDOW;
+            if (k > 0 && k > glow[n.s]) glow[n.s] = k;
+        }
+        ctx.save();
+        for (let s = 0; s < stringCount; s++) {
+            const k = glow[s];
+            if (k <= 0) continue;
+            const yi = _inverted ? (stringCount - 1 - s) : s;
+            const y = strTop + (yi / span) * (strBot - strTop);
+            const color = STRING_BRIGHT[s] || '#fff';
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 6;
+            ctx.globalAlpha = 0.3 + 0.7 * k;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 12 + 12 * k;
+            ctx.beginPath();
+            ctx.moveTo(margin, y);
+            ctx.lineTo(W - margin, y);
+            ctx.stroke();
+        }
+        ctx.restore();
     }
 
     function drawNowLine(W, H) {
@@ -1765,6 +1809,13 @@ function createHighway() {
         },
 
         getLefty() { return _lefty; },
+
+        setTilted(on) {
+            _tilted = !!on;
+            localStorage.setItem('tilted', _tilted ? '1' : '0');
+        },
+
+        getTilted() { return _tilted; },
 
         // Master-difficulty (slopsmith#48). Per-instance: splitscreen
         // plugins that call createHighway() separately get their own

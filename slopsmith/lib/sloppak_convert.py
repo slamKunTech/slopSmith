@@ -26,9 +26,9 @@ from typing import Callable, Optional
 
 import yaml
 
-from patcher import unpack_psarc
-from song import load_song, arrangement_to_wire
-from audio import find_wem_files, _vgmstream_cmd, _ffmpeg_cmd, encode_wav_to_ogg
+from lib.patcher import unpack_psarc
+from lib.song import load_song, arrangement_to_wire
+from lib.audio import find_wem_files, _vgmstream_cmd, _ffmpeg_cmd, encode_wav_to_ogg
 
 
 ProgressCB = Optional[Callable[[float, str, str], None]]
