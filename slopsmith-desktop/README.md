@@ -1,17 +1,17 @@
-# Slopsmith Desktop
+# ChordHero Desktop
 
-Standalone cross-platform desktop app that wraps [Slopsmith](https://github.com/byrongamatos/slopsmith) with integrated VST hosting, amp modeling, audio I/O, and full plugin support.
+Standalone cross-platform desktop app that wraps [ChordHero](https://github.com/byrongamatos/slopsmith) with integrated VST hosting, amp modeling, audio I/O, and full plugin support.
 
 ## Features
 
-- **Slopsmith Web UI** in an embedded webview — full library browser, 3D highway renderer, all plugins
+- **ChordHero Web UI** in an embedded webview — full library browser, 3D highway renderer, all plugins
 - **VST3/AU Plugin Host** — load any guitar amp sim (Guitar Rig, AmpliTube, Neural DSP, ToneX, etc.)
 - **Low-latency Audio I/O** — ASIO (Windows), CoreAudio (Mac), JACK/ALSA (Linux)
 - **Built-in NAM** (Neural Amp Modeler) — free amp modeling with community .nam models
 - **Cabinet IR Loader** — convolution-based cab simulation
 - **Pitch Detection** — native YIN algorithm feeding into note detection
 - **Signal Chain Builder** — drag and drop VST/NAM/IR processors
-- **Plugin Manager** — install/update/remove Slopsmith plugins via git
+- **Plugin Manager** — install/update/remove ChordHero plugins via git
 - **Cross-platform** — Windows 10+, macOS 12+, Linux
 
 ## Architecture
@@ -22,7 +22,7 @@ Standalone cross-platform desktop app that wraps [Slopsmith](https://github.com/
 │                                                    │
 │  ┌──────────────┐    ┌─────────────────────────┐  │
 │  │ Audio Engine  │    │ Webview                 │  │
-│  │ (JUCE C++)   │    │ (Slopsmith UI)          │  │
+│  │ (JUCE C++)   │    │ (ChordHero UI)          │  │
 │  │              │    │                         │  │
 │  │ Guitar In    │    │  Highway renderer       │  │
 │  │   │          │    │  Library browser        │  │
@@ -38,7 +38,7 @@ Standalone cross-platform desktop app that wraps [Slopsmith](https://github.com/
 │         ▼                       ▼                  │
 │  ┌──────────────┐    ┌─────────────────────────┐  │
 │  │ Node.js      │    │ Python Subprocess       │  │
-│  │ (IPC Bridge) │    │ (Slopsmith server.py)   │  │
+│  │ (IPC Bridge) │    │ (ChordHero server.py)   │  │
 │  └──────────────┘    └─────────────────────────┘  │
 └──────────────────────────────────────────────────┘
 ```
@@ -51,7 +51,7 @@ Standalone cross-platform desktop app that wraps [Slopsmith](https://github.com/
 - Python 3.12+
 - CMake 3.22+
 - Git
-- [Slopsmith](https://github.com/byrongamatos/slopsmith) cloned at `../slopsmith/` (preferred) or `~/Repositories/slopsmith/`
+- [ChordHero](https://github.com/byrongamatos/slopsmith) cloned at `../slopsmith/` (preferred) or `~/Repositories/slopsmith/`
 
 **Linux:**
 ```bash
@@ -105,7 +105,7 @@ inside the DevContainer:
 
 **Prerequisites**
 - [Docker](https://docs.docker.com/get-docker/)
-- The [Slopsmith](https://github.com/byrongamatos/slopsmith) server
+- The [ChordHero](https://github.com/byrongamatos/slopsmith) server
   repository cloned at `../slopsmith/`
 
 **VS Code**
@@ -152,9 +152,9 @@ Free amp modeling using community-created neural network models. Download .nam f
 - [ToneHunt](https://tonehunt.org)
 - [NAM Model Database](https://github.com/sdatkinson/NeuralAmpModelerPlugin/wiki/Models)
 
-## Slopsmith Plugins
+## ChordHero Plugins
 
-All Slopsmith plugins work in the desktop app. The embedded Python server runs the same `server.py` and discovers plugins the same way.
+All ChordHero plugins work in the desktop app. The embedded Python server runs the same `server.py` and discovers plugins the same way.
 
 ### Installing Plugins
 

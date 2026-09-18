@@ -1,4 +1,4 @@
-// Slopsmith Desktop — Electron Main Process
+// ChordHero Desktop — Electron Main Process
 // Manages: window lifecycle, Python subprocess, audio engine bridge, plugin management
 
 import { app, BrowserWindow, ipcMain, dialog, shell, session, crashReporter } from 'electron';
@@ -75,7 +75,7 @@ const STARTUP_POLL_INTERVAL_MS = 700;
 let startupStatusSnapshot: StartupStatus = {
     running: true,
     phase: 'booting',
-    message: 'Starting Slopsmith...',
+    message: 'Starting ChordHero...',
     currentPlugin: '',
     loaded: 0,
     total: 0,
@@ -110,7 +110,7 @@ function createSplashWindow(): void {
         fullscreenable: false,
         frame: false,
         show: true,
-        title: 'Slopsmith',
+        title: 'ChordHero',
         backgroundColor: '#050508',
         webPreferences: {
             preload: path.join(__dirname, 'splash-preload.js'),
@@ -147,8 +147,8 @@ function createWindow(port: number): void {
         height: 900,
         minWidth: 800,
         minHeight: 600,
-        title: 'Slopsmith',
-        backgroundColor: '#0f172a', // slate-900 to match Slopsmith UI
+        title: 'ChordHero',
+        backgroundColor: '#0f172a', // slate-900 to match ChordHero UI
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -321,10 +321,10 @@ function openWebUrlExternally(url: string): void {
 }
 
 // Permissions we always deny, regardless of origin. These are
-// high-impact device APIs Slopsmith has no use for — refusing them up
+// high-impact device APIs ChordHero has no use for — refusing them up
 // front shrinks the attack surface even on the trusted renderer
 // origin, so a malicious or compromised plugin can't reach for them.
-// Add to this list if a real Slopsmith feature ever needs one.
+// Add to this list if a real ChordHero feature ever needs one.
 const DENY_PERMISSIONS = new Set([
     'serial',
     'hid',
@@ -375,11 +375,11 @@ function makeRendererOriginPredicate(rendererPort: number): (url: string) => boo
 //
 // Policy:
 // - Block DENY_PERMISSIONS (serial / hid / usb / bluetooth / geolocation /
-//   idle-detection) for *every* origin, including the renderer. Slopsmith
+//   idle-detection) for *every* origin, including the renderer. ChordHero
 //   has no use for these; pre-denying them keeps a compromised plugin
 //   from reaching for them.
 // - For `media` from the renderer origin, allow audio-only requests
-//   (Slopsmith uses the microphone for pitch detection) but deny when
+//   (ChordHero uses the microphone for pitch detection) but deny when
 //   `details.mediaTypes` includes `video` — we have no camera feature,
 //   so a getUserMedia({video:true}) call must be a plugin bug or worse.
 // - For every other permission, grant when the request comes from the
@@ -406,7 +406,7 @@ function installRendererPermissions(rendererPort: number): void {
         if (permission === 'media') {
             // Electron passes mediaTypes (`'audio'` / `'video'`) for the
             // request-handler path. Allow only when the request is
-            // explicitly audio-only — Slopsmith doesn't use the camera,
+            // explicitly audio-only — ChordHero doesn't use the camera,
             // so we want both "video requested" AND "mediaTypes
             // missing/empty" to deny (the latter would otherwise let an
             // older / synthetic request slip through).
@@ -437,7 +437,7 @@ function installRendererPermissions(rendererPort: number): void {
 }
 
 async function startup(): Promise<void> {
-    console.log('[main] Starting Slopsmith Desktop...');
+    console.log('[main] Starting ChordHero Desktop...');
 
     // Clear the HTTP disk cache before anything loads. The UI is served
     // from 127.0.0.1:<port> with a stable port (18000) across launches,
@@ -458,7 +458,7 @@ async function startup(): Promise<void> {
     createSplashWindow();
     publishStartupStatus({ message: 'Starting backend service...', phase: 'booting', running: true });
 
-    // Start Python server (Slopsmith backend)
+    // Start Python server (ChordHero backend)
     startPython();
 
     // Initialize audio engine (JUCE native addon).
