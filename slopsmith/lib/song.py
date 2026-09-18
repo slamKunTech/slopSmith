@@ -109,6 +109,10 @@ class Arrangement:
     name: str
     tuning: list[int] = field(default_factory=lambda: [0] * 6)
     capo: int = 0
+    # "guitar" = string/fret positions (pitch = BASE_STD[s]+tuning[s]+f+capo);
+    # "keys" = piano-plugin encoding (pitch = s*24+f, MIDI imports).
+    # Default "guitar" keeps GP/RS/PSARC paths unchanged.
+    encoding: str = "guitar"
     notes: list[Note] = field(default_factory=list)
     chords: list[Chord] = field(default_factory=list)
     anchors: list[Anchor] = field(default_factory=list)
@@ -334,6 +338,7 @@ def arrangement_to_wire(arr: Arrangement) -> dict:
         "name": arr.name,
         "tuning": list(arr.tuning),
         "capo": arr.capo,
+        "encoding": arr.encoding,
         "notes": [note_to_wire(n) for n in arr.notes],
         "chords": [chord_to_wire(c) for c in arr.chords],
         "anchors": [{"time": a.time, "fret": a.fret, "width": a.width} for a in arr.anchors],
@@ -363,6 +368,7 @@ def arrangement_from_wire(d: dict) -> Arrangement:
         name=d.get("name", ""),
         tuning=list(d.get("tuning", [0] * 6)),
         capo=int(d.get("capo", 0)),
+        encoding=str(d.get("encoding", "guitar")),
         notes=[note_from_wire(n) for n in d.get("notes", [])],
         chords=[chord_from_wire(c) for c in d.get("chords", [])],
         anchors=[

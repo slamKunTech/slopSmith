@@ -137,6 +137,8 @@ def test_pitch_encoding(tmp_path):
     assert n["f"] == 60 % 24
     # Reconstruct: s*24 + f should recover original MIDI pitch
     assert n["s"] * 24 + n["f"] == 60
+    # Keys encoding flag — Learn mode picks the pitch formula from this
+    assert result["encoding"] == "keys"
 
 
 def test_constant_tempo_timing(tmp_path):

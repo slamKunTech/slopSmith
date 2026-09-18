@@ -323,6 +323,7 @@ def convert_midi_track_to_keys_wire(
         "name": name,
         "tuning": [0, 0, 0, 0, 0, 0],
         "capo": 0,
+        "encoding": "keys",
         "notes": notes_out,
         "chords": [],
         "anchors": [],
