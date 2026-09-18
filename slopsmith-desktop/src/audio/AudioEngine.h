@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 class AudioEngine : private juce::AudioIODeviceCallback
@@ -140,6 +141,19 @@ private:
     NoiseGate noiseGate;
     ChordScorer chordScorer;
     juce::AudioFormatManager formatManager;
+
+    // Asynchronous device scan. CoreAudio's scanForDevices() can block for a
+    // long time (TCC permission prompts, hung/virtual drivers, aggregate
+    // devices), and the constructor runs on the caller's thread (Electron
+    // main / Node), so a synchronous scan stalls the whole app startup. The
+    // scan runs on this member thread instead and the ctor returns
+    // immediately. getDeviceTypes() returns type names right away but only
+    // fills device names once devicesScanned flips, so we never read names
+    // while the scan thread is writing them. `destroyed` lets the scan bail
+    // out between device types during shutdown.
+    std::thread scanThread;
+    std::atomic<bool> devicesScanned{false};
+    std::atomic<bool> destroyed{false};
 
     std::atomic<float> inputGain{1.0f};
     std::atomic<float> outputGain{1.0f};

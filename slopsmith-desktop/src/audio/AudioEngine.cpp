@@ -21,19 +21,46 @@ AudioEngine::AudioEngine()
     // Log available device types
     auto& availableTypes = deviceManager.getAvailableDeviceTypes();
     std::cerr << "[AudioEngine] Available device types: " << availableTypes.size() << std::endl;
-    for (auto* type : availableTypes)
-    {
-        type->scanForDevices();
-        std::cerr << "[AudioEngine]   " << type->getTypeName().toStdString()
-                  << " - inputs: " << type->getDeviceNames(true).size()
-                  << ", outputs: " << type->getDeviceNames(false).size() << std::endl;
-    }
+
+    // Scan each device type for its concrete devices on a background thread.
+    // scanForDevices() issues CoreAudio/HAL queries that can block for a long
+    // time (TCC mic-permission prompts, hung or virtual drivers, aggregate
+    // devices). Doing it inline here would block the caller's thread — the
+    // Electron main / Node thread — stalling the entire app startup (the
+    // Python backend and window never come up). The constructor now returns
+    // immediately and getDeviceTypes() fills device names once
+    // devicesScanned flips.
+    scanThread = std::thread([this]() {
+        for (auto* type : deviceManager.getAvailableDeviceTypes())
+        {
+            if (destroyed.load(std::memory_order_acquire)) break;
+            if (type == nullptr) continue;
+            type->scanForDevices();
+            std::cerr << "[AudioEngine]   " << type->getTypeName().toStdString()
+                      << " - inputs: " << type->getDeviceNames(true).size()
+                      << ", outputs: " << type->getDeviceNames(false).size() << std::endl;
+        }
+        devicesScanned.store(true, std::memory_order_release);
+    });
 }
 
 AudioEngine::~AudioEngine()
 {
     stopAudio();
     stopBacking();
+    // Ask the scan thread to stop between device types. If it already
+    // finished, join cleanly; if it is still blocked inside a scanForDevices
+    // call we detach rather than hang shutdown (the blocked call is in
+    // platform audio code, not in our members, so the residual risk is
+    // confined to app-quit with a hung driver).
+    destroyed.store(true, std::memory_order_release);
+    if (scanThread.joinable())
+    {
+        if (devicesScanned.load(std::memory_order_acquire))
+            scanThread.join();
+        else
+            scanThread.detach();
+    }
 }
 
 // ── Device Enumeration ────────────────────────────────────────────────────────
@@ -41,15 +68,23 @@ AudioEngine::~AudioEngine()
 juce::Array<AudioEngine::DeviceTypeInfo> AudioEngine::getDeviceTypes()
 {
     juce::Array<DeviceTypeInfo> types;
+    const bool scanned = devicesScanned.load(std::memory_order_acquire);
 
     for (auto* type : deviceManager.getAvailableDeviceTypes())
     {
+        if (type == nullptr) continue;
         DeviceTypeInfo info;
         info.name = type->getTypeName();
 
-        // Use already-scanned device names (scanForDevices was called during init)
-        info.inputDevices = type->getDeviceNames(true);
-        info.outputDevices = type->getDeviceNames(false);
+        // Device names are populated by the background scan thread. Only read
+        // them once the scan has finished (devicesScanned) so we never race
+        // the scan thread's writes. Before that, return the type with empty
+        // device lists; callers re-query once the scan completes.
+        if (scanned)
+        {
+            info.inputDevices = type->getDeviceNames(true);
+            info.outputDevices = type->getDeviceNames(false);
+        }
 
         types.add(std::move(info));
     }
