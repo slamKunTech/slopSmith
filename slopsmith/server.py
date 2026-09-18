@@ -24,8 +24,33 @@ import concurrent.futures
 import sqlite3
 import threading
 import xml.etree.ElementTree as ET
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="Rocksmith Web")
+
+@asynccontextmanager
+async def _lifespan(app: "FastAPI"):
+    """Startup/shutdown lifecycle.
+
+    Replaces the deprecated @app.on_event("startup") handler (which emitted
+    DeprecationWarnings on every request under newer Starlette). The body runs
+    once at server start, after the module is fully imported, so the globals
+    it references (load_plugins, meta_db, startup_scan, ...) are all bound by
+    then despite being defined later in this file.
+    """
+    # Load plugins in background after server starts
+    load_plugins(app, {
+        "config_dir": CONFIG_DIR,
+        "get_dlc_dir": _get_dlc_dir,
+        "extract_meta": _extract_meta_for_file,
+        "meta_db": meta_db,
+        "get_sloppak_cache_dir": lambda: SLOPPAK_CACHE_DIR,
+    })
+    # Start background metadata scan
+    startup_scan()
+    yield
+
+
+app = FastAPI(title="Rocksmith Web", lifespan=_lifespan)
 
 
 @app.middleware("http")
@@ -202,8 +227,13 @@ class MetadataDB:
             where += " AND format = ?"
             params.append(format_filter)
         if q:
-            where += " AND (title LIKE ? COLLATE NOCASE OR artist LIKE ? COLLATE NOCASE OR album LIKE ? COLLATE NOCASE)"
-            params += [f"%{q}%"] * 3
+            # Multi-keyword fuzzy search: each whitespace-separated token
+            # must appear in title/artist/album (AND), case-insensitive.
+            for token in q.split():
+                where += (" AND (title LIKE ? COLLATE NOCASE"
+                          " OR artist LIKE ? COLLATE NOCASE"
+                          " OR album LIKE ? COLLATE NOCASE)")
+                params += [f"%{token}%"] * 3
 
         sort_map = {
             "artist": "artist COLLATE NOCASE", "artist-desc": "artist COLLATE NOCASE DESC",
@@ -254,8 +284,13 @@ class MetadataDB:
             where += " AND UPPER(SUBSTR(artist, 1, 1)) = ?"
             params.append(letter.upper())
         if q:
-            where += " AND (title LIKE ? COLLATE NOCASE OR artist LIKE ? COLLATE NOCASE OR album LIKE ? COLLATE NOCASE)"
-            params += [f"%{q}%"] * 3
+            # Multi-keyword fuzzy search: each whitespace-separated token
+            # must appear in title/artist/album (AND), case-insensitive.
+            for token in q.split():
+                where += (" AND (title LIKE ? COLLATE NOCASE"
+                          " OR artist LIKE ? COLLATE NOCASE"
+                          " OR album LIKE ? COLLATE NOCASE)")
+                params += [f"%{token}%"] * 3
 
         # Get paginated distinct artists
         total_artists = self.conn.execute(
@@ -669,22 +704,9 @@ def _background_scan():
 from plugins import load_plugins, register_plugin_api
 register_plugin_api(app)
 
-# Plugin loading deferred to startup event (see below) to avoid blocking
-# server startup when many plugins are installed.
-
-
-@app.on_event("startup")
-def startup_events():
-    # Load plugins in background after server starts
-    load_plugins(app, {
-        "config_dir": CONFIG_DIR,
-        "get_dlc_dir": _get_dlc_dir,
-        "extract_meta": _extract_meta_for_file,
-        "meta_db": meta_db,
-        "get_sloppak_cache_dir": lambda: SLOPPAK_CACHE_DIR,
-    })
-    # Start background metadata scan
-    startup_scan()
+# Plugin loading is deferred to the _lifespan startup hook (defined near the
+# top of this module) to avoid blocking server startup when many plugins are
+# installed.
 
 
 def startup_scan():
@@ -1527,6 +1549,10 @@ async def highway_ws(websocket: WebSocket, filename: str, arrangement: int = -1)
             # using `tuning.length` directly.
             "stringCount": arrangement_string_count(arr),
             "capo": arr.capo,
+            # "guitar" = string/fret positions (pitch = BASE_STD[s]+tuning[s]+f+capo);
+            # "keys" = piano-plugin encoding (pitch = s*24+f). Learn mode and
+            # plugins use this to compute expected pitches.
+            "encoding": getattr(arr, "encoding", "guitar"),
             "format": "sloppak" if is_slop else "psarc",
             "stems": stems_payload,
         })
@@ -1787,6 +1813,13 @@ def serve_audio(filename: str):
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# ── MIDI -> GP5 -> sloppak conversion UI (slopsmith-desktop/src/midi2gp5) ───
+try:
+    from convert_api import router as convert_router
+    app.include_router(convert_router)
+except Exception as _e:  # pragma: no cover - optional feature
+    print(f"[server] convert_api not loaded: {_e}")
 
 
 @app.get("/")
