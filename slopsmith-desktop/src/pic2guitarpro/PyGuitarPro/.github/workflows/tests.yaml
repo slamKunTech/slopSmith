@@ -1,0 +1,27 @@
+name: Tests
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+jobs:
+  tests:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: '3.14', python: '3.14', just: test}
+          - {name: '3.13', python: '3.13', just: test}
+          - {name: '3.12', python: '3.12', just: test}
+          - {name: '3.11', python: '3.11', just: test}
+          - {name: '3.10', python: '3.10', just: test}
+          - {name: PyPy3, python: 'pypy3.11', just: test}
+          - {name: Lint, python: '3.13', just: lint}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - env:
+          UV_PYTHON: ${{ matrix.python }}
+        run: uvx --from rust-just just ${{ matrix.just }}

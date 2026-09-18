@@ -1,0 +1,70 @@
+[project]
+name = "PyGuitarPro"
+version = "0.11"
+description = "Read, write, and manipulate GP3, GP4 and GP5 files."
+readme = "README.rst"
+license = "LGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{name = "Sviatoslav Abakumov", email = "dust.harvesting@gmail.com"}]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: Artistic Software",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "attrs>=19.2",
+]
+
+[dependency-groups]
+docs = [
+    "sphinx>=7.4.7",
+    "sphinx-rtd-theme>=3.0.2",
+]
+pre-commit = [
+    "pre-commit>=4.3.0",
+    "pre-commit-uv>=4.1.5",
+]
+tests = [
+    "pytest>=8.4.1",
+]
+
+[tool.uv]
+default-groups = ["pre-commit", "tests"]
+
+[project.urls]
+Documentation = "https://pyguitarpro.readthedocs.io/"
+"Source code" = "https://github.com/Perlence/PyGuitarPro"
+"Issue tracker" = "https://github.com/Perlence/PyGuitarPro/issues"
+
+[build-system]
+build-backend = "uv_build"
+requires = ["uv_build>=0.11.7,<0.12"]
+
+[tool.uv.build-backend]
+module-name = "guitarpro"
+source-include = [
+    "docs/**",
+    "examples/**",
+    "tests/**",
+    "CHANGES.rst",
+    "uv.lock",
+]
+source-exclude = [
+    "docs/_build",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.flake8]
+max-line-length = 120

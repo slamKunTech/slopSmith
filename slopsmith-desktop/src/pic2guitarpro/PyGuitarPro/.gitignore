@@ -1,0 +1,47 @@
+*.py[cod]
+.DS_Store
+
+# C extensions
+*.so
+
+# Packages
+*.egg
+*.egg-info
+dist
+build
+eggs
+.eggs
+parts
+bin
+var
+sdist
+develop-eggs
+.installed.cfg
+lib
+lib64
+
+# Installer logs
+pip-log.txt
+
+# Unit test / coverage reports
+.cache/
+.coverage/
+.hypothesis/
+.pytest_cache/
+.tox/
+nosetests.xml
+
+# Translations
+*.mo
+
+# Built documentation
+docs/_build
+
+# Virtual environment
+.venv
+
+# Sublime Text files
+*.sublime-*
+
+# ctags
+tags
