@@ -76,6 +76,44 @@
     const SNR_MIN_DB = 15;              // candidate bin must clear the adaptive noise floor by this much
     const MIN_PEAK_DB = -70;            // frame peak must clear this for ANY detection — kills ghost notes on a silent/muted input
 
+    // ── Pick-attack (onset) detection ──────────────────────────────────────
+    // Spectral flux = sum of positive per-bin dB deltas vs the previous frame.
+    // A fresh pick dumps broadband energy in at once → a flux spike; a decaying
+    // sustain only goes down → near-zero flux. This is the signal that lets
+    // the practice pipeline tell "a new pick" apart from "the same note still
+    // ringing", which is what 不同拨弦识别 hinges on.
+    //
+    // Live effect: a strong attack (_frameRepick) on a string:fret that is
+    // already ringing splits it into a second note, so repeated picks of the
+    // same note are scored as separate notes instead of one long sustain.
+    // The flags are also exposed on window.freeplay.__debug for diagnostics.
+    //
+    // We deliberately do NOT bypass the ONSET_FRAMES debounce on onset: the
+    // first frame of a pick is attack-transient-dominated and confirming a
+    // candidate immediately there risks locking a wrong fret. Learn mode's
+    // EARLY_GRACE / WAIT_LOOKBACK already absorb the debounce latency.
+    const ONSET_FLUX_ABS = 60;          // flux floor — idle noise/hum never reads as an attack
+    const ONSET_FLUX_MULT = 1.8;        // flux must beat this × its own EMA to count as an onset
+    const REPICK_FLUX_MULT = 2.6;       // stricter gate for splitting a ringing note (avoids fragmenting clean sustains)
+
+    // ── Debug logging ────────────────────────────────────────────────────
+    // The detection loop runs ~30×/s. Emitting formatted console.log lines
+    // every frame (spectrum dumps, raw/per-note detection, suppression
+    // reasons) is a real hot-path cost — string interpolation + console I/O
+    // on the audio thread's UI counterpart — and it floods DevTools so the
+    // useful lines scroll away. Gate ALL of it behind DEBUG, off by default.
+    // Enable for troubleshooting without a code edit via:
+    //   • localStorage.setItem('fpDebug','1')  (persist across reloads), or
+    //   • the ?fpdebug=1 query string          (one-off).
+    const DEBUG = (function () {
+        try {
+            if (localStorage.getItem('fpDebug') === '1') return true;
+            if (/[?&]fpdebug=1\b/.test(location.search)) return true;
+        } catch { /* storage blocked / non-browser */ }
+        return false;
+    })();
+    const dbg = DEBUG ? (...a) => console.log(...a) : () => {};
+
     // ── State ────────────────────────────────────────────────────────────
     let canvas = null, ctx = null, rafId = null, running = false;
     let lastPollAt = 0, pollInFlight = false;
@@ -89,6 +127,12 @@
     let webAudioOk = false, sampleRate = 48000;
     let lastDiagAt = 0;
     let lastPeakDb = -Infinity;
+    // Pick-attack detector state (see ONSET_FLUX_* constants).
+    let _prevDb = null;        // previous frame's dB spectrum (Float32Array)
+    let _fluxEma = 0;          // exponential moving average of spectral flux
+    let _frameFlux = 0;        // this frame's raw flux
+    let _frameOnset = false;   // this frame carries a pick attack
+    let _frameRepick = false;  // strong attack — safe to split a ringing note
 
     // Note pipeline (shared by polyphonic + fallback)
     let notes = [];                    // closed notes: {t, s, f, sus}  (t = abs seconds)
@@ -105,6 +149,10 @@
     // Recording export
     let mediaRecorder = null, recChunks = [], audioBlob = null, recMime = '';
 
+    // Learn-mode song reference: pins the detection grid to the song's
+    // tuning/capo (non-standard tunings are otherwise undetectable).
+    let _refOffsets = null, _refCapo = null;
+
     // HUD element refs
     let elNote, elFreq, elPos, elOverlay, elOverlayTitle, elOverlayBody;
     let elTuning, elCapo, elDevice, elRec, elPlay, elLoopBtn, elClear, elRecTime;
@@ -114,8 +162,14 @@
     function $(id) { return document.getElementById(id); }
 
     // ── Tuning / capo helpers ────────────────────────────────────────────
-    function currentOffsets() { return TUNINGS[elTuning ? elTuning.value : 'std-E'] || TUNINGS['std-E']; }
+    // Learn mode overrides these via setSongReference() so detection uses
+    // the song's actual tuning/capo instead of the Free Play UI selectors.
+    function currentOffsets() {
+        if (_refOffsets) return _refOffsets;
+        return TUNINGS[elTuning ? elTuning.value : 'std-E'] || TUNINGS['std-E'];
+    }
     function currentCapo() {
+        if (_refCapo !== null) return _refCapo;
         const v = elCapo ? parseInt(elCapo.value, 10) : 0;
         return Number.isFinite(v) ? Math.max(0, Math.min(12, v)) : 0;
     }
@@ -272,25 +326,57 @@
         // uniform, so nothing clears the gate — no ghost notes while the
         // guitar is silent. Median is robust against the few strong bins
         // a real note excites, so the estimate stays valid while playing.
-        const finite = [];
+        //
+        // Perf: computing the median by sorting all 4096 bins every frame
+        // (~30 fps) is an O(n log n) hot-path cost. getFloatFrequencyData
+        // returns dB in roughly [-120, 0], so we bucket into a fixed 0.5 dB
+        // histogram and walk it to the 50th percentile — single O(n) pass,
+        // and 0.5 dB quantisation is far finer than the 15 dB SNR gate needs.
+        const HIST_LO = -120, HIST_STEP = 0.5, HIST_N = 240; // covers [-120, 0]
+        const hist = new Int32Array(HIST_N + 1);
+        let finiteCount = 0;
         let framePeakDb = -Infinity;
+        // Spectral flux (pick attack) folded into this same single pass: sum
+        // of the positive per-bin dB deltas vs the previous frame. No extra
+        // O(n) sweep.
+        if (!_prevDb || _prevDb.length !== freqData.length) {
+            _prevDb = new Float32Array(freqData.length);
+            _prevDb.fill(-Infinity);
+        }
+        let flux = 0;
         for (let i = 0; i < freqData.length; i++) {
-            if (!isFinite(freqData[i])) continue;
-            finite.push(freqData[i]);
-            if (freqData[i] > framePeakDb) framePeakDb = freqData[i];
+            const db = freqData[i];
+            if (!isFinite(db)) continue;
+            finiteCount++;
+            if (db > framePeakDb) framePeakDb = db;
+            const d = db - _prevDb[i];
+            if (d > 0) flux += d;
+            _prevDb[i] = db;
+            let b = Math.round((db - HIST_LO) / HIST_STEP);
+            if (b < 0) b = 0; else if (b > HIST_N) b = HIST_N;
+            hist[b]++;
         }
         lastPeakDb = framePeakDb;
+        // Onset gate uses the EMA from BEFORE this frame is folded in, so a
+        // sudden spike still towers over the running average.
+        _frameFlux = flux;
+        const onsetGate = Math.max(ONSET_FLUX_ABS, ONSET_FLUX_MULT * _fluxEma);
+        const repickGate = Math.max(ONSET_FLUX_ABS, REPICK_FLUX_MULT * _fluxEma);
+        _fluxEma = _fluxEma * 0.9 + flux * 0.1;
         let noiseDb;
-        if (finite.length >= 16) {
-            finite.sort((a, b) => a - b);
-            noiseDb = finite[finite.length >> 1];
+        if (finiteCount >= 16) {
+            const half = finiteCount >> 1;
+            let acc = 0, mb = 0;
+            for (; mb <= HIST_N; mb++) { acc += hist[mb]; if (acc > half) break; }
+            noiseDb = HIST_LO + mb * HIST_STEP;
         } else {
             noiseDb = ABS_FLOOR_DB; // near-total silence: fall back to absolute floor
         }
         // Throttled spectrum diagnostic for the low string: one line per
         // second with the dB levels of the low E fundamental + first
         // harmonics. Pluck 6弦 once and paste the last few lines.
-        {
+        // Gated behind DEBUG so the hot path stays silent in normal use.
+        if (DEBUG) {
             const t = performance.now();
             if (t - lastDiagAt > 1000) {
                 lastDiagAt = t;
@@ -302,7 +388,7 @@
                 };
                 const devLabel = micStream && micStream.getAudioTracks().length
                     ? micStream.getAudioTracks()[0].label : 'none';
-                console.log(`=== 6弦频谱 === dev=${devLabel} peak=${framePeakDb.toFixed(1)}dB noise=${noiseDb.toFixed(1)}dB gate=${(noiseDb + SNR_MIN_DB).toFixed(1)}dB`
+                dbg(`=== 6弦频谱 === dev=${devLabel} peak=${framePeakDb.toFixed(1)}dB noise=${noiseDb.toFixed(1)}dB gate=${(noiseDb + SNR_MIN_DB).toFixed(1)}dB`
                     + ` | E2=${dbAt(f0)} 2nd=${dbAt(f0 * 2)} 3rd=${dbAt(f0 * 3)} 4th=${dbAt(f0 * 4)} 5th=${dbAt(f0 * 5)}`);
             }
         }
@@ -311,7 +397,9 @@
         // (wrong/muted device, unplugged cable) — bail out instead of
         // letting the degenerate relative gate turn numeric noise into
         // ghost notes on random strings.
-        if (framePeakDb < MIN_PEAK_DB) return [];
+        if (framePeakDb < MIN_PEAK_DB) { _frameOnset = false; _frameRepick = false; return []; }
+        _frameOnset = flux > onsetGate;
+        _frameRepick = flux > repickGate;
         const linAt = (bin) => {
             if (bin < 0 || bin >= freqData.length) return 0;
             const db = freqData[bin];
@@ -409,19 +497,25 @@
             return [{ s: winners[0].s, f: winners[0].f, midi: winners[0].midi }];
         }
 
-        // DEBUG: Log what each string detected before filtering
-        if (winners.length > 0) {
-            console.log(`=== Raw detection === (noiseFloor=${noiseDb.toFixed(1)}dB)`);
+        // DEBUG: Log what each string detected before filtering (gated).
+        if (DEBUG && winners.length > 0) {
+            dbg(`=== Raw detection === (noiseFloor=${noiseDb.toFixed(1)}dB)`);
             winners.forEach(w => {
                 const note = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][w.midi % 12];
                 const octave = Math.floor(w.midi / 12) - 1;
-                console.log(`String ${w.s+1}: fret ${w.f}, ${note}${octave} (MIDI ${w.midi}), fund=${w.fund.toFixed(2)}, score=${w.score.toFixed(2)}`);
+                dbg(`String ${w.s+1}: fret ${w.f}, ${note}${octave} (MIDI ${w.midi}), fund=${w.fund.toFixed(2)}, score=${w.score.toFixed(2)}`);
             });
         }
 
-        // AGGRESSIVE SINGLE-NOTE STRATEGY for resonant low strings
-        // Guitar playing is 99% monophonic. Only keep multiple notes if they are
-        // genuinely a chord (similar attack energy). Otherwise, pick the strongest.
+        // Chord-vs-single-note arbitration for resonant low strings.
+        //
+        // The per-string stage above already yields at most ONE candidate per
+        // string (which is exactly the physical model of a guitar chord), each
+        // having cleared REL_GATE (fundamental ≥ 12% of the frame peak) with
+        // same-string harmonics skipped. So `winners` is already a credible
+        // chord. What remains is to drop (a) sympathetic resonance from
+        // neighbouring strings and (b) octave/harmonic ghosts — WITHOUT
+        // collapsing genuine chords down to a single note.
 
         // Find the absolute strongest candidate by total score
         let strongest = winners[0];
@@ -448,7 +542,7 @@
                     // The thinner string's detection is sympathetic resonance
                     if (Math.abs(lower.midi - current.midi) <= 7) { // within a 5th
                         current.likelyResonance = true;
-                        console.log(`String ${current.s+1} likely resonance from string ${lower.s+1}`);
+                        dbg(`String ${current.s+1} likely resonance from string ${lower.s+1}`);
                     }
                 }
             }
@@ -465,10 +559,17 @@
             }
         }
 
-        // Only keep other candidates if they are within 80% of the strongest score
-        // (real chord: all strings plucked together with similar energy)
-        // Raised from 70% to 80% for even stricter filtering
-        const CHORD_THRESHOLD = 0.80;
+        // Keep other candidates that clear CHORD_THRESHOLD of the strongest
+        // score and aren't an octave/harmonic of it.
+        //
+        // 0.45 (was 0.80): the previous 0.80 gate forced every chord member
+        // within 20% of the loudest string, which rejected most real strummed
+        // chords — bass strings ring noticeably louder than treble, so genuine
+        // chord members routinely span 2-3× in energy. That silently turned
+        // 和弦练习 into single-note detection. REL_GATE + the resonance filter
+        // above already remove weak ghosts, so a far more permissive energy
+        // gate is both safe and correct here.
+        const CHORD_THRESHOLD = 0.45;
         const kept = [strongest];
 
         for (const c of winners) {
@@ -488,7 +589,7 @@
                     const n = Math.round(ratio);
                     if (Math.abs(ratio - n) < 0.03) {
                         isHarmonic = true;
-                        console.log(`Suppressed: String ${c.s+1} is ${n}th harmonic of strongest string ${strongest.s+1}`);
+                        dbg(`Suppressed: String ${c.s+1} is ${n}th harmonic of strongest string ${strongest.s+1}`);
                     }
                 }
                 // Check if strongest is a harmonic of c
@@ -496,7 +597,7 @@
                     const n = Math.round(invRatio);
                     if (Math.abs(invRatio - n) < 0.03) {
                         isHarmonic = true;
-                        console.log(`Suppressed: String ${c.s+1} (strongest is its ${n}th harmonic)`);
+                        dbg(`Suppressed: String ${c.s+1} (strongest is its ${n}th harmonic)`);
                     }
                 }
 
@@ -504,17 +605,17 @@
                     kept.push(c);
                 }
             } else {
-                console.log(`Suppressed: String ${c.s+1} too weak (${(c.score/strongest.score*100).toFixed(0)}% of strongest)`);
+                dbg(`Suppressed: String ${c.s+1} too weak (${(c.score/strongest.score*100).toFixed(0)}% of strongest)`);
             }
         }
 
-        // DEBUG: Log what survived filtering
-        if (kept.length > 0 && kept.length !== winners.length) {
-            console.log('=== After filtering ===');
+        // DEBUG: Log what survived filtering (gated).
+        if (DEBUG && kept.length > 0 && kept.length !== winners.length) {
+            dbg('=== After filtering ===');
             kept.forEach(k => {
                 const note = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][k.midi % 12];
                 const octave = Math.floor(k.midi / 12) - 1;
-                console.log(`Kept: String ${k.s+1}, ${note}${octave} (MIDI ${k.midi}), score=${k.score.toFixed(2)}`);
+                dbg(`Kept: String ${k.s+1}, ${note}${octave} (MIDI ${k.midi}), score=${k.score.toFixed(2)}`);
             });
         }
 
@@ -565,6 +666,16 @@
             let entry = activeNotes.get(k);
             if (entry) {
                 entry.misses = 0;
+                // Re-pick split: an unambiguous fresh attack on a string:fret
+                // that is ALREADY ringing (and has sounded long enough to be a
+                // real note, not a just-started one) means the player picked it
+                // again. Close the old note and open a new one so repeated
+                // picks register as separate notes instead of merging into one
+                // long sustain — critical for rhythm/chord practice scoring.
+                if (_frameRepick && (now - entry.t) >= MIN_NOTE_SUS) {
+                    closeNote(entry, now);
+                    activeNotes.set(k, { t: now, s: d.s, f: d.f, midi: d.midi, misses: 0 });
+                }
             } else if (pending.has(k)) {
                 const p = pending.get(k);
                 p.seen++;
@@ -781,6 +892,100 @@
         }
     }
 
+    // ── Metronome (standalone click track, adjustable BPM) ────────────────
+    // Sample-accurate lookahead scheduler (Chris Wilson's "A Tale of Two
+    // Clocks" pattern). A frequent setInterval pump does NOT itself make
+    // sound — that would drift (each fire is relative to the last, so error
+    // accumulates) and jitter (main-thread timers are delayed by GC, layout,
+    // the detection loop, etc.). Instead the pump only enqueues clicks a
+    // short distance ahead at exact points on the AudioContext.currentTime
+    // timeline, which is driven by the audio hardware clock. Result: rock-
+    // steady clicks even while the UI thread is busy.
+    let metroOn = false;
+    let metroTimer = null;            // setInterval pump handle
+    let metroBeat = 0;                // beat counter (accent every 4th)
+    let metroBpm = 120;
+    let metroNextTime = 0;            // next beat's time on the audio clock
+    let metroClickCtx = null;         // AudioContext for the click track
+    const METRO_SCHEDULE_AHEAD = 0.1; // s — how far ahead to pre-schedule
+    const METRO_LOOKAHEAD_MS = 25;    // ms — pump interval
+
+    function metroCtx() {
+        // Reuse the mic AudioContext when available (keeps one clock);
+        // otherwise create/refresh a dedicated one for the click track.
+        if (!metroClickCtx || metroClickCtx.state === 'closed') {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            metroClickCtx = (audioCtx && audioCtx.state !== 'closed') ? audioCtx : new AC();
+        }
+        if (metroClickCtx.state === 'suspended') { try { metroClickCtx.resume(); } catch { /* ignore */ } }
+        return metroClickCtx;
+    }
+
+    // Schedule a single click at an exact audio-clock time (not "now").
+    function scheduleClick(when, accent) {
+        const ctx = metroClickCtx;
+        if (!ctx) return;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = accent ? 1200 : 800;
+        osc.type = 'sine';
+        // Short percussive envelope. Guard the ramp start above zero —
+        // exponentialRampToValueAtTime throws on a 0 start value.
+        gain.gain.setValueAtTime(0.0001, when);
+        gain.gain.exponentialRampToValueAtTime(0.5, when + 0.002);
+        gain.gain.exponentialRampToValueAtTime(0.001, when + 0.08);
+        osc.start(when);
+        osc.stop(when + 0.09);
+    }
+
+    function metroScheduler() {
+        const ctx = metroCtx();
+        if (!ctx) return;
+        const secondsPerBeat = 60 / metroBpm;
+        // Enqueue every beat that falls inside the lookahead window.
+        while (metroNextTime < ctx.currentTime + METRO_SCHEDULE_AHEAD) {
+            scheduleClick(metroNextTime, metroBeat % 4 === 0);
+            metroNextTime += secondsPerBeat;
+            metroBeat++;
+        }
+    }
+
+    function metroRestart() {
+        if (metroTimer) clearInterval(metroTimer);
+        const ctx = metroCtx();
+        if (!ctx) return;
+        metroBeat = 0;
+        // Start slightly ahead of "now" so the first click is never late.
+        metroNextTime = ctx.currentTime + 0.06;
+        metroScheduler();                 // prime the first window immediately
+        metroTimer = setInterval(metroScheduler, METRO_LOOKAHEAD_MS);
+    }
+
+    function metroStop() {
+        if (metroTimer) { clearInterval(metroTimer); metroTimer = null; }
+    }
+
+    function toggleMetronome() {
+        metroOn = !metroOn;
+        const btn = document.getElementById('fp-metronome');
+        if (btn) {
+            btn.classList.toggle('bg-accent', metroOn);
+            btn.classList.toggle('text-white', metroOn);
+        }
+        if (metroOn) metroRestart();
+        else metroStop();
+    }
+
+    function setMetronomeBpm(value) {
+        metroBpm = Math.max(30, Math.min(300, parseInt(value, 10) || 120));
+        const input = document.getElementById('fp-metronome-bpm');
+        if (input) input.value = metroBpm;
+        // No restart needed: the scheduler reads `metroBpm` live, so the new
+        // tempo takes effect from the next beat without an audible gap.
+    }
+
     // ── Recording / playback controls ────────────────────────────────────
     function finalizeRecording(now) {
         if (!recording) return;
@@ -934,6 +1139,16 @@
     }
 
     // ── Lifecycle ────────────────────────────────────────────────────────
+    // Named listener (not an anonymous closure) so start()/stop() can
+    // add/remove it symmetrically — repeated Learn toggles would otherwise
+    // accumulate dead listeners.
+    function onDeviceChange() {
+        switchDevice(elDevice.value);
+        // Keep the player page's copy of the dropdown in sync.
+        const playerSel = document.getElementById('player-device');
+        if (playerSel) playerSel.value = elDevice.value;
+    }
+
     async function start() {
         if (running) return;
         canvas = $('freeplay-canvas');
@@ -948,12 +1163,7 @@
         ctx = canvas.getContext('2d');
         resize();
         window.addEventListener('resize', resize);
-        if (elDevice) elDevice.addEventListener('change', () => {
-            switchDevice(elDevice.value);
-            // Keep the player page's copy of the dropdown in sync.
-            const playerSel = document.getElementById('player-device');
-            if (playerSel) playerSel.value = elDevice.value;
-        });
+        if (elDevice) elDevice.addEventListener('change', onDeviceChange);
 
         notes = []; activeNotes.clear(); pending.clear(); session = []; sessionDur = 0; playback = null;
         lastHeardAt = performance.now() / 1000;
@@ -969,6 +1179,10 @@
             : (audioAvailable ? 'JUCE fallback (monophonic)' : 'NONE — no audio input'));
         updateRecButtons();
 
+        // Restore the metronome if the user left it on before navigating away
+        // (stop() preserves metroOn but halts the pump).
+        if (metroOn && (webAudioOk || audioAvailable)) metroRestart();
+
         running = true; lastPollAt = 0;
         tick();
     }
@@ -977,22 +1191,53 @@
         running = false;
         if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
         window.removeEventListener('resize', resize);
+        if (elDevice) elDevice.removeEventListener('change', onDeviceChange);
         // Finalize any in-flight recording so its audio blob completes.
         finalizeRecording(performance.now() / 1000);
         notes = []; activeNotes.clear(); pending.clear();
         playback = null;
         // Release the mic so the indicator turns off when leaving Free Play.
         if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+        // Stop the metronome pump BEFORE suspending audioCtx — the scheduler
+        // would otherwise keep calling metroCtx(), resuming the suspended mic
+        // context and clicking on whatever screen the user navigated to. The
+        // metroOn flag is preserved so start() restores it.
+        metroStop();
         if (audioCtx && audioCtx.state !== 'closed') { try { audioCtx.suspend(); } catch { /* ignore */ } }
+        // Clear the Learn-mode song reference so Free Play returns to its
+        // own tuning/capo selectors.
+        _refOffsets = null; _refCapo = null;
     }
 
-    window.freeplay = { start, stop, toggleRecord, togglePlay, toggleLoop, clearSession, exportMidi, exportAudio, toggleMirror, toggleTilt, populateDevicePicker, switchDevice };
+    window.freeplay = {
+        start, stop, toggleRecord, togglePlay, toggleLoop, clearSession, exportMidi,
+        exportAudio, toggleMirror, toggleTilt, toggleMetronome, setMetronomeBpm,
+        populateDevicePicker, switchDevice,
+        // Learn-mode hooks: what's currently ringing (post onset-debounce),
+        // whether any input path is usable, and the song tuning/capo pin.
+        getDetected() {
+            const out = [];
+            for (const e of activeNotes.values()) out.push({ s: e.s, f: e.f, midi: e.midi });
+            return out;
+        },
+        inputAvailable() { return webAudioOk || audioAvailable; },
+        setSongReference(offsets, capo) {
+            _refOffsets = (offsets && Array.isArray(offsets) && offsets.length)
+                ? offsets.slice(0, 6) : null;
+            _refCapo = Number.isFinite(capo) && capo > 0 ? capo : null;
+        },
+    };
     // Debug interface
     window.freeplay.__debug = {
         get webAudioOk() { return webAudioOk; },
         get analyser() { return analyser; },
         get sampleRate() { return sampleRate; },
         get audioCtx() { return audioCtx; },
-        get activeNotes() { return Array.from(activeNotes.entries()); }
+        get activeNotes() { return Array.from(activeNotes.entries()); },
+        // Pick-attack (spectral-flux) detector observability.
+        get onset() { return _frameOnset; },
+        get repick() { return _frameRepick; },
+        get flux() { return _frameFlux; },
+        get fluxEma() { return _fluxEma; },
     };
 })();

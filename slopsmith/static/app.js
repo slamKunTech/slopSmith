@@ -2,9 +2,13 @@
 function showScreen(id) {
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
     document.getElementById(id).classList.add('active');
+    // Leaving the player: tear Learn down before freeplay's start/stop
+    // below runs, so we don't kill the Free Play screen's fresh pipeline.
+    if (id !== 'player' && learnActive) learnOff();
     if (id === 'home') loadLibrary();
     if (id === 'favorites') loadFavorites();
     if (id === 'settings') loadSettings();
+    if (id === 'convert' && window.convertUI) window.convertUI.onShow();
     if (id === 'player') populatePlayerDevicePicker();
     // Free Play keeps its own canvas+rAF alive (like the player keeps
     // highway). Don't tear it down when *entering* freeplay; only stop it
@@ -308,14 +312,39 @@ function renderPagination(total, page) {
     }
     html += `<button onclick="goLibPage(${page + 1})" class="px-3 py-1.5 rounded-lg text-xs ${page >= totalPages - 1 ? 'text-gray-600 cursor-default' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}" ${page >= totalPages - 1 ? 'disabled' : ''}>›</button>`;
     html += `<button onclick="goLibPage(${totalPages - 1})" class="px-3 py-1.5 rounded-lg text-xs ${page >= totalPages - 1 ? 'text-gray-600 cursor-default' : 'bg-dark-600 text-gray-300 hover:bg-dark-500'}" ${page >= totalPages - 1 ? 'disabled' : ''}>»</button>`;
+    html += `<span class="flex items-center gap-1 ml-2">
+        <span class="text-xs text-gray-500">跳到</span>
+        <input type="number" id="lib-page-input" min="1" max="${totalPages}" value="${page + 1}"
+            onkeydown="if(event.key==='Enter')goLibPageInput(this.value, ${totalPages})"
+            class="w-14 px-2 py-1 bg-dark-600 border border-gray-700 rounded-lg text-xs text-gray-300 outline-none">
+        <button onclick="goLibPageInput(document.getElementById('lib-page-input').value, ${totalPages})"
+            class="px-2.5 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300">跳转</button>
+    </span>`;
     html += `</div>`;
     pag.innerHTML = html;
 }
 
+function goLibPageInput(value, totalPages) {
+    // Jump to a user-typed page number (1-based), clamped to the valid range.
+    const p = parseInt(value, 10);
+    if (!Number.isFinite(p)) return;
+    goLibPage(Math.max(0, Math.min(totalPages - 1, p - 1)));
+}
+
 function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
+    // Fast, allocation-light HTML escaper. The old version built a throwaway
+    // <div> and round-tripped textContent→innerHTML on every call — costly
+    // inside the per-song render loops — and it never escaped quotes, which
+    // broke double-quoted attributes (e.g. value="${esc(title)}") whenever a
+    // title contained a `"`. Entities render identically in text nodes and
+    // are correct in attributes, so escaping quotes is strictly safer.
+    if (s == null) return '';
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 // ── Player input device (mirror of Free Play's Input dropdown) ─────────
@@ -760,6 +789,7 @@ audio.addEventListener('stalled', () => console.log('Audio stalled at', audio.cu
 audio.addEventListener('waiting', () => console.log('Audio waiting/buffering at', audio.currentTime.toFixed(1)));
 audio.addEventListener('ended', () => {
     console.log('Audio ended'); isPlaying = false;
+    if (learnActive) learnOff();
     document.getElementById('btn-play').textContent = '▶ Play';
     window.slopsmith.isPlaying = false;
     window.slopsmith.emit('song:ended', { time: audio.currentTime });
@@ -784,7 +814,7 @@ async function playSong(filename, arrangement) {
     if (artAbortController) artAbortController.abort();
     artAbortController = null;
 
-    highway.stop();
+    const wsClosed = highway.stop();
     audio.pause();
     audio.src = '';
     isPlaying = false;
@@ -795,9 +825,17 @@ async function playSong(filename, arrangement) {
 
     currentFilename = filename;
     showScreen('player');
+    const prog = document.getElementById('hud-progress');
+    if (prog) {
+        prog.classList.remove('hidden');
+        const fill = document.getElementById('hud-progress-fill');
+        if (fill) fill.style.width = '0%';
+    }
 
-    // Wait for previous WebSocket to fully close before opening new one
-    await new Promise(r => setTimeout(r, 500));
+    // Wait for the previous WebSocket to actually close (highway.stop()
+    // resolves on the real 'close' event, 150ms safety cap) instead of a
+    // fixed 500ms nap — same race protection, none of the dead time.
+    await wsClosed;
     highway.init(document.getElementById('highway'));
 
     const arrParam = arrangement !== undefined ? `?arrangement=${arrangement}` : '';
@@ -831,6 +869,7 @@ function changeArrangement(index) {
             const ol = document.getElementById('arr-loading');
             if (ol) ol.remove();
             audio.currentTime = time;
+            metroReset();
             if (wasPlaying) {
                 audio.play().then(() => { isPlaying = true; }).catch(() => {});
             }
@@ -843,16 +882,24 @@ function changeArrangement(index) {
 }
 
 function togglePlay() {
+    // Learn-waiting: Play/Space acts as "skip this note" and resumes.
+    if (learnActive && learnWaiting) learnSkip();
     if (isPlaying) {
         audio.pause(); isPlaying = false;
         document.getElementById('btn-play').textContent = '▶ Play';
+        metroStop();
     } else {
         audio.play(); isPlaying = true;
         document.getElementById('btn-play').textContent = '⏸ Pause';
+        if (_metroOn) metroStart();
     }
 }
 
-function seekBy(s) { audio.currentTime = Math.max(0, audio.currentTime + s); }
+function seekBy(s) {
+    audio.currentTime = Math.max(0, audio.currentTime + s);
+    metroReset();
+    learnResync();
+}
 function setVolume(v) {
     audio.volume = v / 100;
     document.getElementById('vol-label').textContent = v + '%';
@@ -882,6 +929,60 @@ function toggleTilted() {
     } else {
         btn.classList.remove('bg-orange-600/80');
         btn.classList.add('bg-orange-900/40');
+    }
+}
+
+// ── Metronome: clicks on the score's own beat times while playing ───────
+let _metroOn = false;
+let _metroNext = 0;   // index into beats of the next beat to click
+let _metroTimer = null;
+
+function metroReset() {
+    // Position the cursor at the first beat at/after the current time.
+    const beats = highway.getBeats() || [];
+    const t = audio.currentTime;
+    let lo = 0, hi = beats.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (beats[mid].time < t) lo = mid + 1;
+        else hi = mid;
+    }
+    _metroNext = lo;
+}
+
+function metroTick() {
+    if (_countingIn) return;
+    const beats = highway.getBeats() || [];
+    const t = audio.currentTime;
+    while (_metroNext < beats.length && beats[_metroNext].time <= t) {
+        // Accent on measure downbeats; beat times come from the score so
+        // tempo changes are followed automatically.
+        playClick(beats[_metroNext].measure >= 0);
+        _metroNext++;
+    }
+}
+
+function metroStart() {
+    metroStop();
+    metroReset();
+    _metroTimer = setInterval(metroTick, 25);
+}
+
+function metroStop() {
+    if (_metroTimer) { clearInterval(_metroTimer); _metroTimer = null; }
+}
+
+function toggleMetronome() {
+    _metroOn = !_metroOn;
+    const btn = document.getElementById('btn-metronome');
+    if (_metroOn) {
+        btn.classList.remove('bg-emerald-900/40');
+        btn.classList.add('bg-emerald-600/80');
+        if (isPlaying && !_countingIn) metroStart();
+    } else {
+        btn.classList.remove('bg-emerald-600/80');
+        btn.classList.add('bg-emerald-900/40');
+        metroStop();
     }
 }
 
@@ -918,6 +1019,7 @@ function setMastery(v) {
     const pct = Math.max(0, Math.min(100, parsed));
     document.getElementById('mastery-label').textContent = pct + '%';
     highway.setMastery(pct / 100);
+    if (learnActive) { learnBuildEvents(); learnResync(); }
     _persistMastery(pct);
 }
 // Reflect phrase-data availability on the slider after every `ready`.
@@ -940,6 +1042,9 @@ if (window.slopsmith) {
     // event.detail (see EventTarget setup around line 699), so the
     // handler receives an Event, not the raw payload.
     window.slopsmith.on('song:ready', (e) => {
+        // New song / arrangement switch: full Learn reset (button resets,
+        // mic released if we owned it).
+        if (learnActive) learnOff();
         _applyMasteryAvailability(!!e.detail?.hasPhraseData);
         // Auto mode: re-evaluate the active renderer against the
         // newly-loaded song. The picker's current <option> value is the
@@ -981,9 +1086,11 @@ async function _populateVizPicker(plugins) {
     if (!sel) return;
     // Clear any previously-appended plugin options so calling this
     // function more than once (e.g. from DevTools, or a hot-reloaded
-    // plugin) doesn't produce duplicates. The built-in "auto" and
-    // "default" options are static markup — preserve them.
-    const BUILTIN_OPT_VALUES = new Set(['auto', 'default']);
+    // plugin) doesn't produce duplicates. The built-in "auto", "default"
+    // and "tab" options are static markup — preserve them. ("tab" is the
+    // built-in Tablature renderer registered as window.slopsmithViz_tab by
+    // tabview.js — a first-party view, not a discovered plugin.)
+    const BUILTIN_OPT_VALUES = new Set(['auto', 'default', 'tab']);
     Array.from(sel.options).forEach(opt => {
         if (!BUILTIN_OPT_VALUES.has(opt.value)) sel.removeChild(opt);
     });
@@ -1000,16 +1107,16 @@ async function _populateVizPicker(plugins) {
         }
     }
     const vizPlugins = plugins.filter(p => p && p.type === 'visualization');
-    // "default" is reserved for the built-in 2D renderer option and
-    // "auto" is reserved for the Auto-mode entry — both already in the
-    // <select>. A plugin with either id would collide: the
-    // restore-from-localStorage lookup would find the built-in entry,
-    // dragging the plugin into never-selected land silently. Fail
+    // "default" is reserved for the built-in 2D renderer option, "auto" for
+    // the Auto-mode entry, and "tab" for the built-in Tablature view — all
+    // three are already in the <select>. A plugin with any of these ids would
+    // collide: the restore-from-localStorage lookup would find the built-in
+    // entry, dragging the plugin into never-selected land silently. Fail
     // loudly instead.
-    const RESERVED_IDS = new Set(['default', 'auto']);
+    const RESERVED_IDS = new Set(['default', 'auto', 'tab']);
     for (const p of vizPlugins) {
         if (RESERVED_IDS.has(p.id)) {
-            console.error(`viz picker: plugin id '${p.id}' collides with a reserved built-in picker entry ('auto' = Auto mode, 'default' = built-in 2D highway); rename the plugin's id in plugin.json to include it in the picker.`);
+            console.error(`viz picker: plugin id '${p.id}' collides with a reserved built-in picker entry ('auto' = Auto mode, 'default' = built-in 2D highway, 'tab' = built-in Tablature); rename the plugin's id in plugin.json to include it in the picker.`);
             continue;
         }
         // Skip entries where the plugin script hasn't exposed a factory —
@@ -1339,6 +1446,7 @@ function startCountIn() {
     if (_countingIn) return;
     _countingIn = true;
     audio.pause();
+    metroStop();
 
     // Rewind animation: sweep highway time from B to A
     const rewindDuration = 400; // ms
@@ -1378,6 +1486,7 @@ function startCountIn() {
                 audio.play();
                 isPlaying = true;
                 document.getElementById('btn-play').textContent = '⏸ Pause';
+                if (_metroOn) metroStart();
                 return;
             }
             showCountOverlay(count);
@@ -1404,9 +1513,40 @@ setInterval(() => {
         }
         lastAudioTime = audio.currentTime;
         document.getElementById('hud-time').textContent = `${formatTime(audio.currentTime)} / ${formatTime(audio.duration)}`;
+        // Full-song seek bar fill (top-right HUD)
+        const fill = document.getElementById('hud-progress-fill');
+        if (fill) fill.style.width = `${Math.min(100, (audio.currentTime / audio.duration) * 100)}%`;
     }
     if (!_countingIn) highway.setTime(audio.currentTime);
+    if (!_countingIn) learnTick();
 }, 1000 / 60);
+
+// Full-song seek bar (top-right HUD): click/drag to jump anywhere in the song.
+const _progressEl = document.getElementById('hud-progress');
+let _progressDragging = false;
+function progressSeekFromEvent(e) {
+    if (!audio.duration) return;
+    const rect = _progressEl.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    audio.currentTime = ratio * audio.duration;
+    metroReset();
+    learnResync();
+}
+if (_progressEl) {
+    _progressEl.addEventListener('pointerdown', (e) => {
+        _progressEl.setPointerCapture(e.pointerId);
+        _progressDragging = true;
+        progressSeekFromEvent(e);
+    });
+    _progressEl.addEventListener('pointermove', (e) => {
+        if (_progressDragging) progressSeekFromEvent(e);
+    });
+    _progressEl.addEventListener('pointerup', (e) => {
+        _progressDragging = false;
+        _progressEl.releasePointerCapture(e.pointerId);
+    });
+}
 
 // Keyboard shortcuts (player only)
 document.addEventListener('keydown', e => {
@@ -1423,6 +1563,186 @@ document.addEventListener('keydown', e => {
     else if (e.key === '[') { e.preventDefault(); nudgeAvOffsetMs(e.shiftKey ? -50 : -10); }
     else if (e.key === ']') { e.preventDefault(); nudgeAvOffsetMs(e.shiftKey ?  50 :  10); }
 });
+
+// ── Learn mode: pause-and-wait practice (Rocksmith/Synthesia style) ─────
+// Playback pauses when a note reaches the hit line and resumes only when
+// the player sounds the matching pitch on their input device. Notes played
+// EARLY_GRACE seconds before the line pass through without pausing. Press
+// Play/Space while waiting to skip the note.
+const LEARN = {
+    EARLY_GRACE: 0.35,    // s — notes played this early before the line pass without pausing
+    WAIT_LOOKBACK: 0.30,  // s — after pausing, accept history this far back (covers detection latency)
+    SKIP_SLACK: 0.10,     // s — events this far behind currentTime are considered passed (seek/buffer)
+};
+const LEARN_BASE_MIDI = [40, 45, 50, 55, 59, 64];  // mirrors freeplay.js BASE_STD
+
+let learnActive = false;
+let learnWaiting = false;
+let learnWaitingTarget = null;      // expected MIDI pitch while waiting
+let learnWaitingEventT = 0;         // ev.t of the note being waited on
+let learnWaitingAt = 0;             // performance.now()/1000 when the wait began
+let learnEvents = [];               // merged sorted [{t, kind:'note'|'chord', note|chord}]
+let learnPtr = 0;
+let learnHistory = [];              // rolling [{t, midis:Set}] early-play buffer
+let learnOwnsFreeplay = false;      // we started freeplay — we must stop it
+
+function learnPitch(s, f, info) {
+    if (info.encoding === 'keys') return s * 24 + f;
+    const tuning = info.tuning || [];
+    return (s < LEARN_BASE_MIDI.length ? LEARN_BASE_MIDI[s] : 0)
+        + (tuning[s] || 0) + f + (info.capo || 0);
+}
+
+// 主音: chord events judge only their highest-pitch note.
+function learnTargetOf(ev, info) {
+    if (ev.kind === 'note') return learnPitch(ev.note.s, ev.note.f, info);
+    let max = -Infinity;
+    for (const cn of ev.chord.notes) max = Math.max(max, learnPitch(cn.s, cn.f, info));
+    return max;
+}
+
+function learnBuildEvents() {
+    const notes = (highway.getPlayableNotes && highway.getPlayableNotes()) || [];
+    const chords = (highway.getPlayableChords && highway.getPlayableChords()) || [];
+    const evs = [];
+    for (const n of notes) evs.push({ t: n.t, kind: 'note', note: n });
+    for (const c of chords) evs.push({ t: c.t, kind: 'chord', chord: c });
+    evs.sort((a, b) => a.t - b.t);
+    // Same-instant note+chord: judge as the chord (covers the moment).
+    const merged = [];
+    for (const e of evs) {
+        const prev = merged[merged.length - 1];
+        if (prev && prev.t === e.t) {
+            if (e.kind === 'chord') merged[merged.length - 1] = e;
+        } else merged.push(e);
+    }
+    learnEvents = merged;
+    learnPtr = merged.findIndex(e => e.t >= audio.currentTime);
+    if (learnPtr < 0) learnPtr = merged.length;
+}
+
+function learnResync() {
+    if (!learnActive) return;
+    learnWaiting = false; learnWaitingTarget = null; learnHistory = [];
+    learnPtr = learnEvents.findIndex(e => e.t >= audio.currentTime);
+    if (learnPtr < 0) learnPtr = learnEvents.length;
+}
+
+function learnAdvancePastCurrent() {
+    while (learnPtr < learnEvents.length && learnEvents[learnPtr].t <= audio.currentTime + 0.001) learnPtr++;
+}
+
+function learnResume() {
+    learnWaiting = false; learnWaitingTarget = null; learnHistory = [];
+    learnAdvancePastCurrent();
+    audio.play(); isPlaying = true;
+    document.getElementById('btn-play').textContent = '⏸ Pause';
+    if (_metroOn) metroStart();
+}
+
+function learnSkip() {
+    if (!learnActive || !learnWaiting) return;
+    learnWaiting = false; learnWaitingTarget = null; learnHistory = [];
+    learnAdvancePastCurrent();
+}
+
+function learnTick() {
+    if (!learnActive || _countingIn || !window.freeplay) return;
+
+    if (learnWaiting) {
+        // Paused at the line: wait for the target pitch (live detection, or
+        // the pre-pause history covering detection latency).
+        const live = window.freeplay.getDetected();
+        let found = live.some(d => Math.round(d.midi) === learnWaitingTarget);
+        if (!found && performance.now() / 1000 - learnWaitingAt < LEARN.WAIT_LOOKBACK) {
+            found = learnHistory.some(h =>
+                h.t >= learnWaitingEventT - LEARN.EARLY_GRACE && h.midis.has(learnWaitingTarget));
+        }
+        if (found) learnResume();
+        return;  // audio stays paused with the note frozen on the hit line
+    }
+
+    if (!isPlaying) return;
+    const t = audio.currentTime;
+
+    // Rolling early-play history.
+    const det = window.freeplay.getDetected();
+    if (det.length) learnHistory.push({ t, midis: new Set(det.map(d => Math.round(d.midi))) });
+    const cutoff = t - (LEARN.EARLY_GRACE + LEARN.WAIT_LOOKBACK);
+    if (learnHistory.length && learnHistory[0].t < cutoff) {
+        learnHistory = learnHistory.filter(h => h.t >= cutoff);
+    }
+
+    // Consume events already behind (seek jumps, buffer stalls, loop rewinds).
+    while (learnPtr < learnEvents.length && learnEvents[learnPtr].t < t - LEARN.SKIP_SLACK) learnPtr++;
+    if (learnPtr >= learnEvents.length) return;
+
+    const ev = learnEvents[learnPtr];
+    if (t < ev.t) return;  // not at the line yet
+
+    // Crossed the line: pass if played early, otherwise pause and wait.
+    const target = learnTargetOf(ev, highway.getSongInfo() || {});
+    const heard = learnHistory.some(h =>
+        h.t >= ev.t - LEARN.EARLY_GRACE && h.midis.has(target));
+    if (heard) {
+        learnHistory = [];
+        learnPtr++;
+    } else {
+        learnWaiting = true;
+        learnWaitingTarget = target;
+        learnWaitingEventT = ev.t;
+        learnWaitingAt = performance.now() / 1000;
+        audio.pause(); isPlaying = false;
+        document.getElementById('btn-play').textContent = '▶ Play';
+        metroStop();
+    }
+}
+
+function learnOff() {
+    learnActive = false; learnWaiting = false; learnWaitingTarget = null;
+    learnEvents = []; learnPtr = 0; learnHistory = [];
+    if (learnOwnsFreeplay && window.freeplay) {
+        window.freeplay.stop();
+        window.freeplay.setSongReference(null);
+    }
+    learnOwnsFreeplay = false;
+    const btn = document.getElementById('btn-learn');
+    if (btn) {
+        btn.textContent = 'Learn';
+        btn.className = 'px-4 py-1.5 bg-red-600 hover:bg-red-500 rounded-lg text-xs font-semibold text-white transition';
+    }
+}
+
+function toggleLearn() {
+    if (learnActive) { learnOff(); return; }
+    const info = highway.getSongInfo ? highway.getSongInfo() : null;
+    if (!info || !info.tuning) return;  // no song loaded
+    if ((info.stringCount || 6) > 6) {
+        alert('Learn 模式暂不支持 7 弦以上的谱面');
+        return;
+    }
+    learnActive = true;
+    learnBuildEvents();
+    if (window.freeplay) {
+        window.freeplay.setSongReference(info.tuning, info.capo || 0);
+        window.freeplay.start().then(() => {  // async mic acquire — warn once usable
+            if (!window.freeplay.inputAvailable()) {
+                console.warn('Learn: no audio input available — notes will never ' +
+                    'match; use Space to skip');
+            }
+        }).catch(() => { /* mic permission denied — Space skip still works */ });
+        learnOwnsFreeplay = true;
+    }
+    if (info.encoding === 'keys') {
+        console.warn('Learn: keys-encoded chart — pitches outside the guitar ' +
+            'range (MIDI <40 or >88) cannot be matched; use Space to skip');
+    }
+    const btn = document.getElementById('btn-learn');
+    if (btn) {
+        btn.textContent = '◉ Learn';
+        btn.className = 'px-4 py-1.5 bg-red-700 ring-2 ring-red-400 rounded-lg text-xs font-semibold text-white transition';
+    }
+}
 
 // ── Edit metadata modal ─────────────────────────────────────────────────
 function openEditModal(songData) {

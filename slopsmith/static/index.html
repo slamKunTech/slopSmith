@@ -41,6 +41,7 @@
                 <a href="#library-section" onclick="showScreen('home')" class="text-sm text-gray-400 hover:text-white transition">Library</a>
                 <a href="#" onclick="showScreen('favorites');return false" class="text-sm text-gray-400 hover:text-white transition">Favorites</a>
                 <a href="#" onclick="showScreen('freeplay');return false" class="text-sm text-gray-400 hover:text-white transition">Free Play</a>
+                <a href="#" onclick="showScreen('convert');return false" class="text-sm text-gray-400 hover:text-white transition">Convert</a>
                 <span id="nav-plugins" class="contents"></span>
                 <a href="#" onclick="showScreen('settings');return false" class="text-sm text-gray-400 hover:text-white transition">Settings</a>
             </div>
@@ -54,6 +55,7 @@
                 <a href="#library-section" onclick="showScreen('home');this.parentElement.parentElement.classList.add('hidden')" class="text-gray-400 hover:text-white">Library</a>
                 <a href="#" onclick="showScreen('favorites');this.parentElement.parentElement.classList.add('hidden');return false" class="text-gray-400 hover:text-white">Favorites</a>
                 <a href="#" onclick="showScreen('freeplay');this.parentElement.parentElement.classList.add('hidden');return false" class="text-gray-400 hover:text-white">Free Play</a>
+                <a href="#" onclick="showScreen('convert');this.parentElement.parentElement.classList.add('hidden');return false" class="text-gray-400 hover:text-white">Convert</a>
                 <span id="mobile-nav-plugins" class="flex flex-col gap-2 border-t border-b border-gray-800 py-2 my-1">
                     <span class="text-xs text-gray-600 uppercase tracking-wider">Plugins</span>
                 </span>
@@ -149,6 +151,104 @@
     <!-- ══ Plugin screens injected dynamically by loadPlugins() ══════════ -->
 
     <!-- ══ SETTINGS ═══════════════════════════════════════════════════════ -->
+    <!-- ── MIDI Convert screen ──────────────────────────────────────────── -->
+    <div id="convert" class="screen">
+        <div class="max-w-3xl mx-auto px-6 pt-24 pb-16">
+            <button onclick="showScreen('home')" class="text-gray-500 hover:text-white text-sm mb-6 flex items-center gap-1">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg> Back
+            </button>
+            <h2 class="text-3xl font-bold text-white mb-2">MIDI Converter</h2>
+            <p class="text-sm text-gray-500 mb-8">Batch-convert a folder of MIDI files into Guitar&nbsp;Pro&nbsp;5 tabs and <span class="text-gray-400">.sloppak</span> DLC (arrangement + audio). Incremental: finished songs are skipped.</p>
+
+            <div class="space-y-6">
+                <div>
+                    <label class="text-sm font-medium text-gray-400 mb-2 block">MIDI source folder <span class="text-gray-600">(scanned recursively for .mid/.midi)</span></label>
+                    <div class="flex gap-3">
+                        <input type="text" id="cv-midi-src" placeholder="/path/to/midi_collection"
+                            class="flex-1 bg-dark-700 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-gray-300 placeholder-gray-600 focus:border-accent/50 outline-none">
+                        <button onclick="convertUI.pickDir('cv-midi-src')" class="bg-dark-600 hover:bg-dark-500 px-4 py-2.5 rounded-xl text-sm text-gray-300 transition whitespace-nowrap">📂 Browse</button>
+                    </div>
+                </div>
+                <div>
+                    <label class="text-sm font-medium text-gray-400 mb-2 block">GP5 tab output folder <span class="text-gray-600">(directory tree is mirrored here)</span></label>
+                    <div class="flex gap-3">
+                        <input type="text" id="cv-gp5-dir" placeholder="/path/to/gp5_output"
+                            class="flex-1 bg-dark-700 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-gray-300 placeholder-gray-600 focus:border-accent/50 outline-none">
+                        <button onclick="convertUI.pickDir('cv-gp5-dir')" class="bg-dark-600 hover:bg-dark-500 px-4 py-2.5 rounded-xl text-sm text-gray-300 transition whitespace-nowrap">📂 Browse</button>
+                    </div>
+                </div>
+                <div>
+                    <label class="text-sm font-medium text-gray-400 mb-2 block">sloppak DLC output folder <span class="text-gray-600">(add to Settings → Extra DLC Folders after)</span></label>
+                    <div class="flex gap-3">
+                        <input type="text" id="cv-sloppak-out" placeholder="/path/to/sloppak_converted/my_collection"
+                            class="flex-1 bg-dark-700 border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-gray-300 placeholder-gray-600 focus:border-accent/50 outline-none">
+                        <button onclick="convertUI.pickDir('cv-sloppak-out')" class="bg-dark-600 hover:bg-dark-500 px-4 py-2.5 rounded-xl text-sm text-gray-300 transition whitespace-nowrap">📂 Browse</button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-x-8 gap-y-3 pt-2">
+                    <label class="flex items-center gap-3 cursor-pointer select-none">
+                        <input type="checkbox" id="cv-stage-a" checked class="rounded border-gray-600 bg-dark-700 text-accent focus:ring-accent/40">
+                        <span class="text-sm text-gray-300">Stage A · MIDI → GP5</span>
+                    </label>
+                    <label class="flex items-center gap-3 cursor-pointer select-none">
+                        <input type="checkbox" id="cv-stage-b" checked class="rounded border-gray-600 bg-dark-700 text-accent focus:ring-accent/40">
+                        <span class="text-sm text-gray-300">Stage B · GP5 → sloppak</span>
+                    </label>
+                    <label class="flex items-center gap-3 cursor-pointer select-none">
+                        <input type="checkbox" id="cv-overwrite" class="rounded border-gray-600 bg-dark-700 text-accent focus:ring-accent/40">
+                        <span class="text-sm text-gray-300">Regenerate existing GP5 tabs</span>
+                    </label>
+                    <label class="flex items-center gap-3 cursor-pointer select-none">
+                        <input type="checkbox" id="cv-force" class="rounded border-gray-600 bg-dark-700 text-accent focus:ring-accent/40">
+                        <span class="text-sm text-gray-300">Reconvert existing sloppaks</span>
+                    </label>
+                    <div class="flex items-center gap-3">
+                        <span class="text-sm text-gray-400 whitespace-nowrap">Stage A workers</span>
+                        <input type="number" id="cv-jobs" value="6" min="1" max="12" class="w-20 bg-dark-700 border border-gray-800 rounded-lg px-3 py-1.5 text-sm text-gray-300 outline-none">
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="text-sm text-gray-400 whitespace-nowrap">Stage B workers</span>
+                        <input type="number" id="cv-sworkers" value="4" min="1" max="8" class="w-20 bg-dark-700 border border-gray-800 rounded-lg px-3 py-1.5 text-sm text-gray-300 outline-none">
+                    </div>
+                </div>
+
+                <div class="flex gap-3 pt-2">
+                    <button onclick="convertUI.start()" id="cv-start" class="bg-accent hover:bg-accent-light px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition">Start conversion</button>
+                    <button onclick="convertUI.cancel()" id="cv-cancel" class="hidden bg-red-900/40 hover:bg-red-900/60 px-6 py-2.5 rounded-xl text-sm font-semibold text-red-200 transition">Cancel</button>
+                    <span id="cv-msg" class="self-center text-sm"></span>
+                </div>
+            </div>
+
+            <!-- progress -->
+            <div id="cv-progress" class="hidden mt-10 bg-dark-800/60 border border-gray-800 rounded-2xl p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-white font-semibold">Conversion job <span id="cv-jobid" class="text-gray-500 text-xs font-mono"></span></h3>
+                    <span id="cv-state" class="text-xs px-2.5 py-1 rounded-full bg-accent/20 text-accent-light"></span>
+                </div>
+                <div id="cv-stage-label" class="text-sm text-gray-400 mb-4"></div>
+                <div class="space-y-4">
+                    <div>
+                        <div class="flex justify-between text-xs text-gray-500 mb-1"><span>MIDI → GP5</span><span id="cv-a-count"></span></div>
+                        <div class="h-2 bg-dark-700 rounded-full overflow-hidden"><div id="cv-a-bar" class="h-full bg-accent rounded-full transition-all duration-500" style="width:0%"></div></div>
+                    </div>
+                    <div>
+                        <div class="flex justify-between text-xs text-gray-500 mb-1"><span>GP5 → sloppak</span><span id="cv-b-count"></span></div>
+                        <div class="h-2 bg-dark-700 rounded-full overflow-hidden"><div id="cv-b-bar" class="h-full bg-purple-400 rounded-full transition-all duration-500" style="width:0%"></div></div>
+                    </div>
+                </div>
+                <div class="mt-4 flex gap-4 text-xs text-gray-500">
+                    <span>✓ <span id="cv-ok">0</span></span><span>✗ <span id="cv-fail">0</span></span><span>↷ skipped <span id="cv-skip">0</span></span>
+                </div>
+                <details class="mt-4">
+                    <summary class="text-xs text-gray-500 cursor-pointer select-none">Live log</summary>
+                    <pre id="cv-log" class="mt-2 text-[11px] leading-4 text-gray-500 bg-dark-900/80 rounded-xl p-3 h-48 overflow-y-auto whitespace-pre-wrap font-mono"></pre>
+                </details>
+                <div class="mt-4 text-xs text-gray-600">New .sloppak packages land in your sloppak output folder — add it under <span class="text-gray-400">Settings → Extra DLC Folders</span>, then Rescan Library to play them.</div>
+            </div>
+        </div>
+    </div>
+
     <div id="settings" class="screen">
         <div class="max-w-2xl mx-auto px-6 pt-24 pb-16">
             <button onclick="showScreen('home')" class="text-gray-500 hover:text-white text-sm mb-6 flex items-center gap-1">
@@ -319,6 +419,8 @@
             <div class="flex items-center gap-2 ml-auto flex-wrap">
                 <button id="fp-mirror" onclick="window.freeplay.toggleMirror()" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition" title="Mirror strings (123456 ↔ 654321)">🔄 Mirror</button>
                 <button id="fp-tilt" onclick="window.freeplay.toggleTilt()" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition" title="Toggle 45° tilt">↗ Tilt</button>
+                <button id="fp-metronome" onclick="window.freeplay.toggleMetronome()" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition" title="Metronome">🎵 节拍器</button>
+                <input id="fp-metronome-bpm" type="number" min="30" max="300" value="120" onchange="window.freeplay.setMetronomeBpm(this.value)" class="w-16 bg-dark-600 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none" title="Metronome BPM (30-300)">
                 <span class="text-gray-700 mx-0.5">|</span>
                 <label class="text-xs text-gray-500" for="fp-device">Input</label>
                 <select id="fp-device" class="bg-dark-600 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 outline-none max-w-[150px]">
@@ -386,12 +488,18 @@
             </div>
             <div class="text-right">
                 <div id="hud-time" class="text-sm text-gray-400"></div>
+                <div id="hud-progress" class="hidden mt-1 w-64 pointer-events-auto cursor-pointer select-none" title="Drag to seek anywhere in the song">
+                    <div class="relative h-1.5 bg-dark-600/80 rounded-full overflow-hidden">
+                        <div id="hud-progress-fill" class="absolute left-0 top-0 h-full bg-accent rounded-full" style="width:0%"></div>
+                    </div>
+                </div>
                 <div id="hud-avoffset" class="text-xs text-gray-500 tabular-nums hidden" title="A/V offset — [ and ] to adjust, Shift for ±50 ms">A/V 0 ms</div>
             </div>
         </div>
         <div id="player-controls" class="flex items-center gap-2 px-4 py-2.5 bg-dark-800 border-t border-gray-800/50 flex-wrap">
             <button onclick="seekBy(-5)" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition">⏪ 5s</button>
             <button onclick="togglePlay()" id="btn-play" class="px-4 py-1.5 bg-accent hover:bg-accent-light rounded-lg text-xs font-semibold text-white transition">▶ Play</button>
+            <button onclick="toggleLearn()" id="btn-learn" class="px-4 py-1.5 bg-red-600 hover:bg-red-500 rounded-lg text-xs font-semibold text-white transition" title="Learn — playback pauses at each note until you play it">Learn</button>
             <button onclick="seekBy(5)" class="px-3 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-300 transition">5s ⏩</button>
             <select id="arr-select" onchange="changeArrangement(this.value)" class="bg-dark-600 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300 outline-none max-w-[130px]"></select>
             <input type="range" id="speed-slider" min="25" max="150" value="100" step="5" oninput="setSpeed(this.value/100)" class="w-20 accent-accent">
@@ -406,8 +514,9 @@
                 <option value="">Default</option>
             </select>
             <button onclick="highway.toggleLyrics()" id="btn-lyrics" class="px-3 py-1.5 bg-purple-900/40 hover:bg-purple-900/60 rounded-lg text-xs text-purple-300 transition">Lyrics ✓</button>
-            <button onclick="toggleInverted()" id="btn-inverted" class="px-3 py-1.5 bg-blue-900/40 hover:bg-blue-900/60 rounded-lg text-xs text-blue-300 transition" title="Mirror strings (654321 ⇄ 123456)">↕️ Mirror</button>
+            <button onclick="toggleInverted()" id="btn-inverted" class="px-3 py-1.5 bg-blue-900/40 hover:bg-blue-900/60 rounded-lg text-xs text-blue-300 transition" title="Full mirror: flip string order AND fret direction together">↕️ Mirror</button>
             <button onclick="toggleTilted()" id="btn-tilted" class="px-3 py-1.5 bg-orange-900/40 hover:bg-orange-900/60 rounded-lg text-xs text-orange-300 transition" title="Tilt 45° for easier play-along">↗️ Tilt</button>
+            <button onclick="toggleMetronome()" id="btn-metronome" class="px-3 py-1.5 bg-emerald-900/40 hover:bg-emerald-900/60 rounded-lg text-xs text-emerald-300 transition" title="Metronome clicks on the score's beats while playing">🎵 节拍器</button>
             <select id="quality-select" onchange="highway.setRenderScale(parseFloat(this.value))" class="bg-dark-600 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300 outline-none">
                 <option value="1">HD</option>
                 <option value="0.75">Medium</option>
@@ -417,6 +526,7 @@
             <select id="viz-picker" onchange="setViz(this.value)" class="bg-dark-600 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-gray-300 outline-none" aria-labelledby="viz-picker-label" title="Visualization">
                 <option value="auto">Auto (match arrangement)</option>
                 <option value="default">Highway</option>
+                <option value="tab">Tablature</option>
                 <!-- Additional entries populated on load from /api/plugins (slopsmith#36) -->
             </select>
             <span class="text-gray-700 mx-1">|</span>
@@ -433,9 +543,11 @@
         </div>
     </div>
 
-    <script src="/static/highway.js?v=20260819b"></script>
-    <script src="/static/app.js?v=20260819b"></script>
-    <script src="/static/freeplay.js?v=20260819b"></script>
+    <script src="/static/highway.js?v=20260918"></script>
+    <script src="/static/tabview.js?v=20260918"></script>
+    <script src="/static/app.js?v=20260918"></script>
+    <script src="/static/freeplay.js?v=20260918"></script>
+    <script src="/static/convert.js?v=20260912"></script>
     <script>
         // Navbar scroll effect
         window.addEventListener('scroll', () => {

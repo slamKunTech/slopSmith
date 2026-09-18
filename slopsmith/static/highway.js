@@ -59,6 +59,18 @@ function createHighway() {
     let showLyrics = localStorage.getItem('showLyrics') !== 'false';
     let _drawHooks = [];  // plugin draw callbacks: fn(ctx, W, H)
     let _renderScale = parseFloat(localStorage.getItem('renderScale') || '1');  // 1 = full, 0.5 = half res
+    // One-time migration: with the full-mirror rework (2026-08-23) the
+    // flag's meaning flipped — the default view is now string 1 (red) at
+    // the BOTTOM with frets L→R, and invertHighway=true means the full
+    // mirror. Preserve each user's previously-chosen deviation from the
+    // default by flipping the persisted value once.
+    if (localStorage.getItem('invertHighway_v2') !== '1') {
+        const prev = localStorage.getItem('invertHighway');
+        if (prev !== null) {
+            localStorage.setItem('invertHighway', prev === 'true' ? 'false' : 'true');
+        }
+        localStorage.setItem('invertHighway_v2', '1');
+    }
     let _inverted = localStorage.getItem('invertHighway') === 'true';
     let _lefty = localStorage.getItem('lefty') === '1';
     let _tilted = localStorage.getItem('tilted') === '1';
@@ -110,10 +122,13 @@ function createHighway() {
     }
 
     // ── Anchor / Fret mapping ────────────────────────────────────────────
-    // Zoom approach: fret 0 at the left edge, fret N at the right (entire canvas mirrored when lefty).
-    // The "zoom level" determines how many frets are visible.
-    // When playing low frets, zoom in (fewer frets visible, bigger notes).
-    // When playing high frets, zoom out (more frets visible, smaller spacing).
+    // Zoom approach: fret 0 at the left edge, fret N at the right — unless
+    // Mirror (_inverted) is on, which flips fretX left↔right. The canvas
+    // lefty transform then flips the whole frame again, so inverted+lefty
+    // cancel back to the default layout. The "zoom level" determines how
+    // many frets are visible. When playing low frets, zoom in (fewer frets
+    // visible, bigger notes). When playing high frets, zoom out (more
+    // frets visible, smaller spacing).
     let displayMaxFret = 12;  // rightmost visible fret (smoothed)
 
     function getAnchorAt(t) {
@@ -141,6 +156,22 @@ function createHighway() {
         return maxFret;
     }
 
+    function getMaxFretInWindowFromNotes(t) {
+        // Same look-ahead window as the anchor scan, but over notes — used
+        // when the arrangement carries no hand-position anchors (MIDI/keys
+        // imports), so the fret window adapts to the notes instead of
+        // staying at the fixed default and pushing high-fret notes past
+        // the right edge.
+        const src = _filteredNotes !== null ? _filteredNotes : notes;
+        let maxFret = 0;
+        for (const n of src) {
+            if (n.t > t + VISIBLE_SECONDS + 2) break;
+            if (n.t + 2 < t) continue;
+            if (n.f > maxFret) maxFret = n.f;
+        }
+        return maxFret;
+    }
+
     function updateSmoothAnchor(anchor, dt) {
         // Smoothing rate balances two regressions seen in slopsmith#88:
         //   rate=1.0 (was) snapped to target every frame — visible jitter
@@ -152,10 +183,19 @@ function createHighway() {
         // step at 60fps is ~0.0067 — still small enough that frame-to-frame
         // changes read as smooth.
         const rate = Math.min(0.4 * dt, 0.4);
-        // Look ahead: use the widest fret range across all visible anchors
-        const lookAheadMax = getMaxFretInWindow(currentTime);
-        const currentMax = anchor.fret + anchor.width;
-        const needed = Math.max(currentMax, lookAheadMax);
+        const srcAnchors = _filteredAnchors !== null ? _filteredAnchors : anchors;
+        let needed;
+        if (srcAnchors.length === 0) {
+            // No hand-position anchors (MIDI/keys imports): adapt the fret
+            // window to the widest fret among visible notes so high-fret
+            // notes don't slide past the right edge.
+            needed = getMaxFretInWindowFromNotes(currentTime);
+        } else {
+            // Look ahead: use the widest fret range across all visible anchors
+            const lookAheadMax = getMaxFretInWindow(currentTime);
+            const currentMax = anchor.fret + anchor.width;
+            needed = Math.max(currentMax, lookAheadMax);
+        }
         const targetMax = Math.max(needed + 3, 8);
         displayMaxFret += (targetMax - displayMaxFret) * rate;
     }
@@ -165,7 +205,10 @@ function createHighway() {
         const margin = hw * 0.06;
         const usable = hw * 2 - 2 * margin;
         const t = fret / Math.max(1, displayMaxFret);
-        return w / 2 - hw + margin + t * usable;
+        const x = w / 2 - hw + margin + t * usable;
+        // Mirror flips the whole highway: string order AND fret direction
+        // (fret 0 moves to the right edge, frets increase leftward).
+        return _inverted ? w - x : x;
     }
 
     /** Call while lefty mirror transform is active; keeps glyphs readable. */
@@ -578,7 +621,7 @@ function createHighway() {
         // guards against a hypothetical 1-string instrument (denom=0).
         const span = Math.max(1, stringCount - 1);
         for (let i = 0; i < stringCount; i++) {
-            const yi = _inverted ? (stringCount - 1 - i) : i;
+            const yi = _inverted ? i : (stringCount - 1 - i);
             const y = strTop + (yi / span) * (strBot - strTop);
             ctx.strokeStyle = STRING_COLORS[i] || '#888';
             ctx.lineWidth = 3;
@@ -607,7 +650,7 @@ function createHighway() {
         for (let s = 0; s < stringCount; s++) {
             const k = glow[s];
             if (k <= 0) continue;
-            const yi = _inverted ? (stringCount - 1 - s) : s;
+            const yi = _inverted ? s : (stringCount - 1 - s);
             const y = strTop + (yi / span) * (strBot - strTop);
             const color = STRING_BRIGHT[s] || '#fff';
             ctx.strokeStyle = color;
@@ -837,7 +880,8 @@ function createHighway() {
 
         // Slide indicator (diagonal arrow)
         if (slide >= 0) {
-            const dir = slide > fret ? -1 : 1;  // arrow direction (up or down the neck); mirror handles lefty
+            let dir = slide > fret ? -1 : 1;  // arrow direction (up or down the neck); lefty flips via the canvas transform, mirror needs an explicit flip
+            if (_inverted) dir = -dir;
             ctx.strokeStyle = '#fff';
             ctx.lineWidth = Math.max(2, sz / 10);
             ctx.beginPath();
@@ -1010,7 +1054,7 @@ function createHighway() {
                 // Draw a curved dashed line connecting bent note to target note
                 const x1 = bn.x, y1 = bn.y;
                 const x2 = closest.x, y2 = closest.y;
-                const midX = (x1 + x2) / 2 + sz * 0.5;
+                const midX = (x1 + x2) / 2 + sz * 0.5 * (_inverted ? -1 : 1);
                 const midY = (y1 + y2) / 2;
 
                 ctx.save();
@@ -1032,7 +1076,7 @@ function createHighway() {
                 ctx.textBaseline = 'middle';
                 const cpX = (x1 + 2 * midX + x2) / 4;
                 const cpY = (y1 + 2 * midY + y2) / 4;
-                fillTextReadable('U', cpX + sz * 0.3, cpY);
+                fillTextReadable('U', cpX + sz * 0.3 * (_inverted ? -1 : 1), cpY);
             }
         }
     }
@@ -1059,7 +1103,7 @@ function createHighway() {
             const info = _chordRenderInfo.get(ch);
             const { isFull, baseFret } = info;
 
-            const sorted = [...ch.notes].sort((a, b) => _inverted ? b.s - a.s : a.s - b.s);
+            const sorted = [...ch.notes].sort((a, b) => _inverted ? a.s - b.s : b.s - a.s);
             const sz = Math.max(10, 28 * p.scale * (H / 900));
             const spread = sz * 0.85;
             const minSpread = sz + 16 * p.scale;
@@ -1135,8 +1179,8 @@ function createHighway() {
                     y: p.y * H - actualTotalH / 2 + j * actualSpread,
                 }));
                 const barY = positions[0].y - sz * 0.7;
-                const barLeft = hasNonZero ? xMin : fretX(frameLeftFret, p.scale, W);
-                const barRight = hasNonZero ? xMax : fretX(frameRightFret, p.scale, W);
+                const barLeft = hasNonZero ? xMin : Math.min(fretX(frameLeftFret, p.scale, W), fretX(frameRightFret, p.scale, W));
+                const barRight = hasNonZero ? xMax : Math.max(fretX(frameLeftFret, p.scale, W), fretX(frameRightFret, p.scale, W));
 
                 ctx.fillStyle = REPEAT_BOX_BAR;
                 ctx.lineWidth = Math.max(3, sz / 4);
@@ -1181,8 +1225,8 @@ function createHighway() {
                     const color = STRING_COLORS[cn.s] || '#888';
                     const dark = STRING_DIM[cn.s] || '#222';
                     const barH = sz;
-                    const barLeft = fretX(frameLeftFret, p.scale, W);
-                    const barRight = fretX(frameRightFret, p.scale, W);
+                    const barLeft = Math.min(fretX(frameLeftFret, p.scale, W), fretX(frameRightFret, p.scale, W));
+                    const barRight = Math.max(fretX(frameLeftFret, p.scale, W), fretX(frameRightFret, p.scale, W));
                     ctx.fillStyle = dark;
                     roundRect(ctx, barLeft - 1, ny - barH / 2 - 1, barRight - barLeft + 2, barH + 2, 3);
                     ctx.fill();
@@ -1213,7 +1257,7 @@ function createHighway() {
                     }
                     const x1 = bn.x, y1 = bn.y;
                     const x2 = closest.x, y2 = closest.y;
-                    const midX = (x1 + x2) / 2 + sz * 0.5;
+                    const midX = (x1 + x2) / 2 + sz * 0.5 * (_inverted ? -1 : 1);
                     const midY = (y1 + y2) / 2;
 
                     ctx.save();
@@ -1234,7 +1278,7 @@ function createHighway() {
                     ctx.textBaseline = 'middle';
                     const cpX = (x1 + 2 * midX + x2) / 4;
                     const cpY = (y1 + 2 * midY + y2) / 4;
-                    fillTextReadable('U', cpX + sz * 0.3, cpY);
+                    fillTextReadable('U', cpX + sz * 0.3 * (_inverted ? -1 : 1), cpY);
                 }
             }
         }
@@ -1571,7 +1615,7 @@ function createHighway() {
             const ch = src[i];
             const info = _chordRenderInfo.get(ch);
             const { isOpen } = getChordTemplateInfo(ch.id, chordTemplates);
-            const sortedNotes = [...ch.notes].sort((a, b) => _inverted ? b.s - a.s : a.s - b.s);
+            const sortedNotes = [...ch.notes].sort((a, b) => _inverted ? a.s - b.s : b.s - a.s);
             const nonZero = sortedNotes.filter(cn => !isOpen(cn));
             if (nonZero.length >= 1) {
                 info.baseFret = Math.min(...nonZero.map(cn => cn.f));
@@ -1592,8 +1636,12 @@ function createHighway() {
         const yCenter = p.y * H;
         const boxTop = yCenter - actualTotalH / 2 - sz * 0.5;
         const boxBottom = boxTop + Math.max(sz, actualTotalH + sz);
-        const boxX = fretX(baseFret, p.scale, W);
-        const boxW = fretX(baseFret + CHORD_FRAME_FRETS, p.scale, W) - boxX;
+        // Under mirror, higher frets sit left of lower ones — keep boxX as
+        // the left edge so boxW stays positive.
+        const boxLeft = fretX(baseFret, p.scale, W);
+        const boxRight = fretX(baseFret + CHORD_FRAME_FRETS, p.scale, W);
+        const boxX = Math.min(boxLeft, boxRight);
+        const boxW = Math.abs(boxRight - boxLeft);
         return { boxX, boxW, boxTop, boxH: boxBottom - boxTop };
     }
 
@@ -1658,8 +1706,9 @@ function createHighway() {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         for (const cn of _chordFretLineNotes) {
-            const yi = _inverted ? 5 - cn.s : cn.s;
-            const syl = strTop + (yi / 5) * (strBot - strTop);
+            const span = Math.max(1, stringCount - 1);
+            const yi = _inverted ? cn.s : (stringCount - 1 - cn.s);
+            const syl = strTop + (yi / span) * (strBot - strTop);
             const fretXPos = fretX(cn.f, 1, W);
             ctx.fillStyle = STRING_COLORS[cn.s] || '#888';
             ctx.beginPath();
@@ -2033,6 +2082,19 @@ function createHighway() {
                     case 'ready':
                         ready = true;
                         _rebuildMasteryFilter();
+                        if (!anchors.length && notes.length) {
+                            // Anchor-less source (MIDI/keys imports): seed the
+                            // fret window from the first screenful of notes so
+                            // playback starts already zoomed correctly instead
+                            // of animating in from the fixed default.
+                            const src = _filteredNotes !== null ? _filteredNotes : notes;
+                            let maxFret = 0;
+                            for (const n of src) {
+                                if (n.t > VISIBLE_SECONDS + 2) break;
+                                if (n.f > maxFret) maxFret = n.f;
+                            }
+                            displayMaxFret = Math.max(maxFret + 3, 8);
+                        }
                         console.log(`Highway ready: ${notes.length} notes, ${chords.length} chords` +
                             (_phrases !== null ? `, ${_phrases.length} phrases (mastery ${Math.round(_mastery * 100)}%)` : ""));
                         if (!animFrame) draw();
@@ -2080,6 +2142,10 @@ function createHighway() {
         getTime() { return chartTime; },
         getNotes() { return notes; },
         getChords() { return chords; },
+        // Difficulty-filter-aware ladders — what's actually drawn on
+        // screen. Learn mode judges against these, not the raw arrays.
+        getPlayableNotes() { return _filteredNotes !== null ? _filteredNotes : notes; },
+        getPlayableChords() { return _filteredChords !== null ? _filteredChords : chords; },
         // Live reference to the chord-template lookup table —
         // `getChords()[i].id` is an index into this array. Each
         // template carries `{ name, fingers, frets }`:
@@ -2153,7 +2219,27 @@ function createHighway() {
 
         stop() {
             if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
-            if (ws) { ws.close(); ws = null; }
+            // Tear down the WebSocket and hand back a promise that resolves
+            // once it has actually closed. playSong awaits this so it can
+            // reconnect immediately after real teardown instead of sleeping a
+            // fixed 500ms. A 150ms safety cap guarantees navigation can never
+            // hang if the close handshake stalls (server gone, network drop).
+            let closedPromise = Promise.resolve();
+            if (ws) {
+                const old = ws;
+                ws = null;
+                if (old.readyState === WebSocket.OPEN || old.readyState === WebSocket.CONNECTING) {
+                    closedPromise = new Promise((resolve) => {
+                        let settled = false;
+                        const done = () => { if (!settled) { settled = true; resolve(); } };
+                        old.addEventListener('close', done, { once: true });
+                        setTimeout(done, 150);
+                        try { old.close(); } catch { done(); }
+                    });
+                } else {
+                    try { old.close(); } catch { /* already closed/closing */ }
+                }
+            }
             if (_resizeHandler) {
                 window.removeEventListener('resize', _resizeHandler);
                 _resizeHandler = null;
@@ -2168,6 +2254,7 @@ function createHighway() {
             // already-destroyed instance.
             _destroyCurrentIfInited();
             ready = false;
+            return closedPromise;
         },
 
         /**
