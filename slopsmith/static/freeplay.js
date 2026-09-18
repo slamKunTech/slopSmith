@@ -67,7 +67,7 @@
     const SILENCE_OVERLAY_MS = 2000;
 
     // Polyphonic detection params
-    const FFT_SIZE = 8192;
+    const FFT_SIZE = 16384;
     const HARMONICS = 5;
     const FUND_WEIGHT = 1.0;
     const HARM_WEIGHT = 0.5;
@@ -133,6 +133,7 @@
     let _frameFlux = 0;        // this frame's raw flux
     let _frameOnset = false;   // this frame carries a pick attack
     let _frameRepick = false;  // strong attack — safe to split a ringing note
+    let _lastArb = null;         // e2e diagnostic: last frame's gate/peakFund/perString
 
     // Note pipeline (shared by polyphonic + fallback)
     let notes = [];                    // closed notes: {t, s, f, sus}  (t = abs seconds)
@@ -339,9 +340,12 @@
         // Spectral flux (pick attack) folded into this same single pass: sum
         // of the positive per-bin dB deltas vs the previous frame. No extra
         // O(n) sweep.
+        let freshPrev = false;
         if (!_prevDb || _prevDb.length !== freqData.length) {
             _prevDb = new Float32Array(freqData.length);
             _prevDb.fill(-Infinity);
+            freshPrev = true;   // first frame: no previous -> zero delta, else
+                                // db-(-Inf)=+Inf would poison flux and the EMA
         }
         let flux = 0;
         for (let i = 0; i < freqData.length; i++) {
@@ -349,7 +353,7 @@
             if (!isFinite(db)) continue;
             finiteCount++;
             if (db > framePeakDb) framePeakDb = db;
-            const d = db - _prevDb[i];
+            const d = freshPrev ? 0 : db - _prevDb[i];
             if (d > 0) flux += d;
             _prevDb[i] = db;
             let b = Math.round((db - HIST_LO) / HIST_STEP);
@@ -407,6 +411,35 @@
             if (db <= noiseDb + SNR_MIN_DB) return 0;
             return Math.pow(10, db / 20);
         };
+        // Local-max over the expected bin ±1. A plucked partial almost never
+        // lands exactly on an FFT bin, so a single-bin read under-reports its
+        // energy (leakage splits it across neighbours) — a primary cause of
+        // missed / wrong string-fret detection on real wired input. The local
+        // max recovers the energy and stabilises fundamental + harmonics.
+        const linAtHz = (hz) => {
+            const b = Math.round(hz / binHz);
+            const y2 = linAt(b);
+            if (y2 <= 0) return 0;
+            // Parabolic peak refinement: a genuine partial whose true frequency
+            // falls between bins reads low on the grid (under-read), which made
+            // stacked-octave chord members look like weak harmonics and get
+            // suppressed. If the expected bin is a local max, fit a parabola to
+            // its dB neighbourhood and use the vertex (the partial's true
+            // amplitude). Slope bins (leakage ghosts) are NOT local maxima, so
+            // they stay at their (low) single-bin value — precision preserved.
+            const dbm = freqData[b - 1], db0 = freqData[b], dbp = freqData[b + 1];
+            if (isFinite(dbm) && isFinite(db0) && isFinite(dbp) && db0 >= dbm && db0 >= dbp) {
+                const denom = dbm - 2 * db0 + dbp;
+                if (Math.abs(denom) > 1e-9) {
+                    const d = 0.5 * (dbm - dbp) / denom;
+                    if (d > -1 && d < 1) {
+                        const peakDb = db0 - 0.25 * (dbm - dbp) * d;
+                        if (peakDb > db0 && peakDb > noiseDb + SNR_MIN_DB) return Math.pow(10, peakDb / 20);
+                    }
+                }
+            }
+            return y2;
+        };
 
         // Score every (string, fret) candidate by harmonic sum, track
         // the frame's peak fundamental energy for the relative gate.
@@ -417,8 +450,7 @@
             for (let f = 0; f <= MAX_FRET; f++) {
                 const midi = open + f;
                 const f0 = 440 * Math.pow(2, (midi - 69) / 12);
-                const fundBin = Math.round(f0 / binHz);
-                const fund = linAt(fundBin);
+                const fund = linAtHz(f0);
                 if (fund <= 0) continue;
                 // Harmonic score: weight fundamental heavily, harmonics lightly.
                 // Keep per-harmonic bin levels — the ghost suppressor later
@@ -427,7 +459,7 @@
                 let score = FUND_WEIGHT * fund;
                 const harms = [fund];
                 for (let h = 2; h <= HARMONICS; h++) {
-                    const amp = linAt(Math.round((f0 * h) / binHz));
+                    const amp = linAtHz(f0 * h);
                     harms.push(amp);
                     score += HARM_WEIGHT * amp;
                 }
@@ -453,44 +485,41 @@
         // ghosts sitting beside a much louder real note.
         const gate = REL_GATE * peakFund;
 
-        // Per string: pick the strongest fret above gate that is a local
-        // maximum (louder than its neighbours on the same string).
-        const perString = new Array(STRING_COUNT).fill(null);
-        scored.sort((a, b) => a.f - b.f);
-        const byString = {};
-        for (const c of scored) { (byString[c.s] = byString[c.s] || []).push(c); }
-        for (let s = 0; s < STRING_COUNT; s++) {
-            const arr = byString[s] || [];
-            if (!arr.length) continue;
-            let bestScore = 0;
-            for (const c of arr) {
-                if (c.fund < gate) continue;
-                if (c.score > bestScore) bestScore = c.score;
-            }
-            if (bestScore <= 0) continue;
-            // Walk ascending fret. The first gated candidate within a
-            // factor of 4 of the string's best score wins — that's the
-            // played note. Later candidates whose fundamental sits at an
-            // integer multiple of it are its harmonics (low E's octave at
-            // fret 12 is often LOUDER than the fundamental) and are
-            // skipped so they can't steal the string. The window is
-            // generous because preamped guitars (e.g. Enya Nova Go) roll
-            // off the low-string fundamental hard.
-            let pick = null;
-            for (const c of arr) {
-                if (c.fund < gate) continue;
-                if (pick) {
-                    const r = Math.pow(2, (c.midi - pick.midi) / 12);
-                    const n = Math.round(r);
-                    if (r > 1.05 && r < 16.1 && Math.abs(r - n) < 0.03) continue; // harmonic of pick
-                }
-                if (c.score >= bestScore * 0.25) { pick = c; break; }
-            }
-            perString[s] = pick;
+        // Global multi-pitch selection. Per-string independent max-score lets
+        // one string "steal" another string's pitch — a pitch playable on
+        // several strings has an identical spectrum, so the string whose fret
+        // coincided with a louder neighbour note won that string and the true
+        // member vanished (chords collapsed to a single note). Instead:
+        // aggregate gated candidate energy per MIDI pitch (best (s,f) per
+        // pitch), keep pitches greedily by score, and suppress a pitch only
+        // when it is an exact integer harmonic of an already-kept stronger
+        // pitch AND its fundamental is too weak (<70%) to be its own note —
+        // stacked octaves (each with a real fundamental) still survive.
+        const bestByMidi = {};
+        for (const c of scored) {
+            if (c.fund < gate) continue;
+            const m = c.midi;
+            if (!bestByMidi[m] || c.score > bestByMidi[m].score) bestByMidi[m] = c;
         }
+        const pitchCands = Object.values(bestByMidi).sort((a, b) => b.score - a.score);
+        const keptPitches = [];
+        for (const p of pitchCands) {
+            let suppressed = false;
+            for (const k of keptPitches) {
+                const r = Math.pow(2, (p.midi - k.midi) / 12);
+                if (r > 1.05) {
+                    const n = Math.round(r);
+                    if (Math.abs(r - n) < 0.02 && p.fund < 0.7 * k.fund) { suppressed = true; break; }
+                }
+            }
+            if (!suppressed) keptPitches.push(p);
+        }
+        const perString = keptPitches.slice().sort((a, b) => a.s - b.s);
+
+        _lastArb = { gate, peakFund, perString: perString.map(p => ({ s: p.s, f: p.f, midi: p.midi, score: p.score, fund: p.fund })) };
 
         // Cross-string dedup + harmonic-ghost suppression.
-        let winners = perString.filter(Boolean);
+        let winners = perString;
 
         // If only one winner detected, return it immediately (common case: single string plucked)
         if (winners.length === 1) {
@@ -569,7 +598,7 @@
         // 和弦练习 into single-note detection. REL_GATE + the resonance filter
         // above already remove weak ghosts, so a far more permissive energy
         // gate is both safe and correct here.
-        const CHORD_THRESHOLD = 0.45;
+        const CHORD_THRESHOLD = 0.25;
         const kept = [strongest];
 
         for (const c of winners) {
@@ -807,7 +836,7 @@
                 const cur = window.slopsmithDesktop && window.slopsmithDesktop.audio
                     ? await window.slopsmithDesktop.audio.getCurrentDevice() : null;
                 if (cur) {
-                    const m = inputs.find(d => (d.label && d.label.includes(cur)) || (cur.includes(d.label || ' ')));
+                    const m = inputs.find(d => (d.label && d.label.includes(cur)) || (cur.includes(d.label || ' ')));
                     if (m) preselect = m.deviceId;
                 }
             } catch { /* ignore */ }
@@ -1239,5 +1268,18 @@
         get repick() { return _frameRepick; },
         get flux() { return _frameFlux; },
         get fluxEma() { return _fluxEma; },
+        get arb() { return _lastArb; },
+        // E2E test hook: feed a synthetic dB spectrum (shaped exactly like
+        // AnalyserNode.getFloatFrequencyData output) straight into the real
+        // polyphonic scorer and return its detections. Lets the wired-guitar
+        // recognition pipeline be exercised headlessly — no physical guitar,
+        // no live AudioContext — see tests/e2e/audio_recognition_e2e.js.
+        runDetection(fd, sr) {
+            freqData = fd;
+            sampleRate = sr || 48000;
+            analyser = { getFloatFrequencyData: (out) => out.set(fd) };
+            webAudioOk = true;
+            return detectPolyphonic();
+        },
     };
 })();
