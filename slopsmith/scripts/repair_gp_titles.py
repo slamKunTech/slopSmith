@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 # Make lib/ importable regardless of CWD.
@@ -103,11 +104,12 @@ def main() -> int:
         elif p.is_dir() and p != src_dir:
             dirs_by_name.setdefault(p.name, []).append(p)
 
-    # Gather actions.
-    actions = []  # (kind, dir_name, detail)
-    for entry in sorted(sloppak_dir.iterdir()):
-        if not entry.is_dir() or not entry.name.lower().endswith(".sloppak"):
-            continue
+    # Gather actions. Walk recursively so sloppaks nested in subfolders (e.g.
+    # a per-tuning subdirectory) are repaired too, not silently skipped.
+    actions = []  # (kind, rel_path, detail)
+    for entry in sorted(p for p in sloppak_dir.rglob("*")
+                        if p.is_dir() and p.name.lower().endswith(".sloppak")):
+        rel = entry.relative_to(sloppak_dir).as_posix()
         stem = clean_filename_stem(entry.name)
         mf = entry / "manifest.yaml"
 
@@ -127,11 +129,19 @@ def main() -> int:
             and not is_junk_title(derived[0])
             and repair_text(derived[0]) == derived[0]
         )
+        if not derived_usable:
+            # parse_source_stem couldn't split a usable title (e.g. a leading
+            # id prefix like '7710-...'). Fall back to the whole cleaned stem
+            # as the title — readable and far better than a '?' mojibake title
+            # — instead of deleting a dir that still holds valid audio.
+            if stem and not is_junk_title(stem) and repair_text(stem) == stem:
+                derived = (stem, derived[1] or "")
+                derived_usable = True
 
         if title_ok:
             # Title fine; fix artist only when junk and we have a better one.
             if derived_usable and derived[1] and _needs_artist_fix(str(meta.get("artist", ""))):
-                actions.append(("artist", entry.name, f"{meta.get('artist')!r} → {derived[1]!r}"))
+                actions.append(("artist", rel, f"{meta.get('artist')!r} → {derived[1]!r}"))
             continue
 
         if derived_usable:
@@ -149,16 +159,16 @@ def main() -> int:
                     if gps:
                         src = gps[0]
                 if src is not None:
-                    actions.append(("reconvert", entry.name, f"from {src}", src))
+                    actions.append(("reconvert", rel, f"from {src}", src))
                 else:
-                    actions.append(("delete", entry.name, "no manifest, no matching source"))
+                    actions.append(("delete", rel, "no manifest, no matching source"))
             else:
-                actions.append(("rewrite", entry.name,
+                actions.append(("rewrite", rel,
                                 f"title {meta.get('title')!r} → {derived[0]!r}, "
                                 f"artist {meta.get('artist')!r} → {derived[1]!r}"))
         else:
             # Title junk AND dir name yields nothing usable → delete.
-            actions.append(("delete", entry.name, f"unrecoverable name (stem {stem!r})"))
+            actions.append(("delete", rel, f"unrecoverable name (stem {stem!r})"))
 
     n_rewrite = sum(1 for a in actions if a[0] == "rewrite")
     n_artist = sum(1 for a in actions if a[0] == "artist")
@@ -181,7 +191,15 @@ def main() -> int:
             if kind in ("rewrite", "artist") and entry.is_dir():
                 mf = entry / "manifest.yaml"
                 meta = yaml.safe_load(mf.read_text(encoding="utf-8")) or {}
-                derived = derived_name_for(name)
+                derived = derived_name_for(Path(name).name)
+                # Same whole-stem fallback as the planning pass: when the
+                # parsed title is junk (leading id prefix like '7710-...'),
+                # use the whole cleaned stem so the manifest gets a readable
+                # name instead of a junk fragment.
+                if is_junk_title(derived[0]) or repair_text(derived[0]) != derived[0]:
+                    raw = clean_filename_stem(Path(name).name)
+                    if raw and not is_junk_title(raw) and repair_text(raw) == raw:
+                        derived = (raw, derived[1] or "")
                 if kind == "rewrite":
                     meta["title"] = derived[0]
                 if derived[1]:
@@ -214,7 +232,13 @@ def main() -> int:
                 if entry.is_dir() and entry.resolve() != Path(out).resolve():
                     shutil.rmtree(entry, ignore_errors=True)
             elif kind == "delete" and entry.is_dir():
-                shutil.rmtree(entry)
+                # Never permanently delete user data — move to the OS trash.
+                trash = Path.home() / ".Trash"
+                trash.mkdir(parents=True, exist_ok=True)
+                dest = trash / entry.name
+                if dest.exists():
+                    dest = trash / f"{entry.name}.{int(time.time())}"
+                shutil.move(str(entry), str(dest))
             done[kind] += 1
             log_lines.append(f"[{kind}] {name}  {detail}")
         except Exception as e:

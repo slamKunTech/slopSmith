@@ -117,6 +117,14 @@ def is_junk_title(title: str) -> bool:
         return True
     if "�" in s or any(0xD800 <= ord(c) <= 0xDFFF for c in s):
         return True
+    # cp1252/Latin-1 encoding of GP string fields replaces every un-encodable
+    # CJK character with a literal '?', so a title like '7710-C????-????...'
+    # is an unrecoverable mojibake stem — the real name survives only in the
+    # source filename. Flag it as junk so callers fall back to
+    # parse_source_stem. >=2 avoids false positives on legitimate single-'?'
+    # titles ("Who?").
+    if s.count("?") >= 2:
+        return True
     if s.lower() in _JUNK_TITLE_LITERALS:
         return True
     if _JUNK_TITLE_RE.match(s):
