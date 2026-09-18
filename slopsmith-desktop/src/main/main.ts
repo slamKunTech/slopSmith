@@ -439,6 +439,15 @@ function installRendererPermissions(rendererPort: number): void {
 async function startup(): Promise<void> {
     console.log('[main] Starting Slopsmith Desktop...');
 
+    // Clear the HTTP disk cache before anything loads. The UI is served
+    // from 127.0.0.1:<port> with a stable port (18000) across launches,
+    // and builds before server.py gained its no-cache middleware left
+    // cache entries that Chromium treats as heuristically "fresh" — the
+    // renderer then serves those stale JS files without ever hitting the
+    // server, so a freshly built client shows old UI. Clearing at startup
+    // is cheap (the server is local) and makes rebuilds show up reliably.
+    await session.defaultSession.clearCache();
+
     // Register startup status IPC handlers before creating the splash window
     // so the splash preload's immediate startup:requestStatus is handled.
     ipcMain.handle(IPC_STARTUP_GET_STATUS, () => startupStatusSnapshot);
