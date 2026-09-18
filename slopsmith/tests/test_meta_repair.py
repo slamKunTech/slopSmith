@@ -94,6 +94,19 @@ def test_album_mojibake_repaired_in_meta():
     assert not meta["hidden"]
 
 
+def test_leading_separator_title_is_junk_and_falls_back_to_stem():
+    # GP decoder kept only the artist side of '<title> - <artist>' stems.
+    assert meta_repair.is_junk_title("-Beyond")
+    assert meta_repair.is_junk_title("-&")
+    assert meta_repair.is_junk_title("- G")
+    assert not meta_repair.is_junk_title("Dear John-")
+
+    meta = meta_repair.repair_meta({"title": "-Beyond", "artist": "Beyond", "album": ""},
+                                   "《真的爱你》-Beyond-689761.sloppak")
+    assert meta["title"] == "《真的爱你》-Beyond"
+    assert not meta["hidden"]
+
+
 def test_single_char_title_is_junk_and_falls_back_to_stem():
     meta = meta_repair.repair_meta({"title": "B", "artist": "Unknown", "album": ""},
                                    "B哥《热河路》（变调迦老师）-51433c.sloppak")

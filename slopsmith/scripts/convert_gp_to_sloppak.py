@@ -36,6 +36,7 @@ import gp2rs  # noqa: E402
 import gp2midi  # noqa: E402
 from song import parse_arrangement, arrangement_to_wire  # noqa: E402
 from tunings import tuning_name  # noqa: E402
+from meta_repair import is_junk_artist, is_junk_title, parse_source_stem  # noqa: E402
 
 def _safe(s: str) -> str:
     """Filesystem-safe slug. Keeps CJK (macOS handles UTF-8 paths fine);
@@ -104,8 +105,17 @@ def convert_one(gp_path: Path, out_dir: Path) -> str | None:
         print(f"  ✗ {name}: parse failed: {e}", flush=True)
         return None
 
-    title = _decode_mojibake((gp.title or "").strip()) or gp_path.stem
-    artist = _decode_mojibake((gp.artist or "").strip()) or "Unknown"
+    title = _decode_mojibake((gp.title or "").strip())
+    if is_junk_title(title):
+        # GP internal title unusable → derive from the source filename,
+        # splitting artist when the stem follows the usual `T - A` /
+        # `A《T》` patterns.
+        title, stem_artist = parse_source_stem(gp_path.stem)
+    else:
+        stem_artist = ""
+    artist = _decode_mojibake((gp.artist or "").strip())
+    if is_junk_artist(artist):
+        artist = stem_artist or "Unknown"
     album = _decode_mojibake((gp.album or "").strip())
     year = ""
     if gp.copyright:

@@ -62,15 +62,94 @@ def repair_text(value) -> str:
     return repaired
 
 
+# Titles the GP decoder writes when the file carries no usable name.
+# These are truthy, so they defeat `or gp_path.stem` fallbacks in
+# converters and slip past empty-title checks in scans.
+_JUNK_TITLE_LITERALS = frozenset({
+    "-", "—", "–", "--", "-_", "_-", "_", "?", "??", "n/a", "na",
+    "unknown", "untitled", "track", "track 0", "track 1", "no title",
+})
+
+# Characters that never carry a song name by themselves; a title made
+# entirely of these is a converter scrap.
+_PUNCT_ONLY_CHARS = set("-—–_·.．,，、;；:：*#?()（）[]【】《》<>/\\| \t")
+
+# Short ASCII scraps the GP decoder leaves behind ('K-', 'C-', '-v',
+# '-66', 'IN-K_', '2025', ...): ≤5 chars containing a separator, or all
+# digits. Letters-only words ('OK', 'Red') and longer hyphenated words
+# ('A-Town') are not scraps; 1-2 char alnum stems are already covered by
+# _JUNK_TITLE_RE.
+_SCRAP_TITLE_RE = re.compile(r"^[a-z0-9._\-—–]{1,5}$", re.IGNORECASE)
+
+
+def parse_source_stem(stem: str) -> tuple[str, str]:
+    """(title, artist) parsed from a source-filename stem.
+
+    Patterns (in order): `A《T》(note)`, `《T》-A`, `T - A`, else the whole
+    stem is the title and the artist is empty. 《》 stays part of the
+    title. Shared by the GP converter and the title-repair script."""
+    m = re.match(r"^(.*?)《(.+?)》(.*)$", stem)
+    if m:
+        artist = m.group(1).strip(" -—–·._")
+        title = f"《{m.group(2)}》"
+        note = m.group(3).strip(" -—–·._")
+        if note:
+            artist = f"{artist} {note}".strip() if artist else note
+        return title, artist
+    m = re.match(r"^(.+?)\s*[-—]\s*(.+)$", stem)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return stem.strip(), ""
+
+
 def is_junk_title(title: str) -> bool:
-    """True when the title is an unrecoverable GP conversion stem."""
-    return bool(_JUNK_TITLE_RE.match(title or ""))
+    """True when the title is an unrecoverable GP conversion stem.
+
+    Covers the empty string, known decoder placeholders ('-', 'Untitled',
+    'Track 0', ...), the _JUNK_TITLE_RE stems, punctuation-only scraps,
+    short separator scraps, and strings containing replacement chars/
+    surrogates (filesystem-level mojibake that no encoding repair can
+    recover). The gated mojibake repair is NOT applied here — callers
+    that hold raw manifest values should additionally check
+    ``repair_text(title) != title``."""
+    s = (title or "").strip()
+    if not s:
+        return True
+    if "�" in s or any(0xD800 <= ord(c) <= 0xDFFF for c in s):
+        return True
+    if s.lower() in _JUNK_TITLE_LITERALS:
+        return True
+    if _JUNK_TITLE_RE.match(s):
+        return True
+    if all(ch in _PUNCT_ONLY_CHARS for ch in s):
+        return True
+    # Leading-separator scraps ('-Beyond', '-Christine', '- G', '-&'): the GP
+    # decoder kept only the artist side of a '<title> - <artist>' source stem.
+    if s[0] in "-—–_·.":
+        return True
+    if _SCRAP_TITLE_RE.match(s) and (any(c in "-_—–." for c in s) or s.isdigit()):
+        return True
+    return False
 
 
 def clean_filename_stem(filename: str) -> str:
     """Filename minus '.sloppak' and the trailing converter hash."""
     name = filename[:-8] if filename.lower().endswith(".sloppak") else filename
     return _HASH_SUFFIX_RE.sub("", name).strip()
+
+
+def is_junk_artist(artist: str) -> bool:
+    """True when the artist field is unusable (empty / placeholder /
+    mojibake). Lenient on purpose: short real names ('en', 'Mr_J', 'U2')
+    are valid artists, unlike titles."""
+    s = (artist or "").strip()
+    if not s or s.lower() in ("unknown", "-", "—", "–", "--", "-_", "_"):
+        return True
+    if "�" in s or any(0xD800 <= ord(c) <= 0xDFFF for c in s):
+        return True
+    if repair_text(s) != s:
+        return True
+    return False
 
 
 def repair_meta(meta: dict, filename: str) -> dict:
